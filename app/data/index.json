@@ -1,0 +1,9 @@
+{
+  "datasets": [
+    {
+      "id": "demoland",
+      "path": "demoland",
+      "label": "Demoland"
+    }
+  ]
+}

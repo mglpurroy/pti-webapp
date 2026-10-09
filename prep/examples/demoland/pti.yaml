@@ -1,0 +1,234 @@
+# PTI Builder dataset — Demoland (synthetic)
+#
+# Build:   python prep/build_dataset.py prep/examples/demoland/pti.yaml
+# Every option is documented in docs/CONFIGURATION.md.
+
+id: demoland
+output: ../../../app/data/demoland      # relative to this file
+
+# ── What the app shows ────────────────────────────────────────
+app:
+  title: Project Targeting Index
+  country: Demoland
+  subtitle: Synthetic demo data · 5 km grid
+  default_level: district
+  classes: 5                  # categories per indicator (3–9)
+  classification: quantile    # quantile | equal | natural
+  min_coverage: 0.8           # unit needs ≥80% of the selected weight present to be scored
+  priority_labels: [Very low, Low, Moderate, High, Very high]
+  legend: {low: Lower priority, high: Higher priority}
+  categories:
+    - {name: Poverty & Welfare, color: "#e67e22"}
+    - {name: Services & Access, color: "#2980b9"}
+    - {name: Human Development, color: "#8e44ad"}
+    - {name: Climate & Environment, color: "#16a085"}
+    - {name: Fragility & Operations, color: "#c0392b"}
+  # Thematic PTIs — same method, sector-specific indicators and weights
+  scenarios:
+    - id: core
+      label: Core PTI
+      description: Multi-sector need — poverty, services and human development
+      weights: {poverty_headcount: 25, travel_time_health: 15, electricity_access: 15,
+                net_enrolment: 15, stunting_rate: 15, food_insecurity_phase: 15}
+    - id: social
+      label: Social Development PTI
+      description: Poverty, education and nutrition
+      weights: {poverty_headcount: 40, net_enrolment: 30, stunting_rate: 30}
+    - id: energy
+      label: Energy PTI
+      description: Unserved population with productive potential
+      weights: {electricity_access: 50, population_density: 30, poverty_headcount: 20}
+    - id: nutrition
+      label: Nutrition PTI
+      description: Food insecurity, stunting and health access
+      weights: {food_insecurity_phase: 40, stunting_rate: 35, travel_time_health: 25}
+    - id: operable
+      label: Core PTI + operational access
+      description: Core need, discounted where field access is restricted (a spatial political-economy constraint)
+      weights: {poverty_headcount: 20, travel_time_health: 15, electricity_access: 10,
+                net_enrolment: 10, stunting_rate: 10, food_insecurity_phase: 10, operational_access: 25}
+  about:
+    disclaimer: >-
+      All data in this demo are synthetic. Demoland does not exist.
+    contact: ""
+  # Optional: let users publish results to ArcGIS Online / Enterprise
+  arcgis_publish:
+    portal: https://www.arcgis.com
+
+# ── Spatial units, coarse → fine. The last level is the base unit. ──
+levels:
+  - key: region
+    label: Region
+    code: region_code
+    name: region_name
+    boundaries: {file: inputs/regions.gpkg}
+  - key: district
+    label: District
+    code: district_code
+    name: district_name
+    boundaries: {file: inputs/districts.gpkg}
+  - key: cell
+    label: Grid cell
+    code: cell_id
+    name: cell_name
+    boundaries: {file: inputs/cells.gpkg}
+    # no `parents:` → each cell is assigned to the district/region containing it
+
+simplify: {region: 0.002, district: 0.001}
+
+# Used to population-weight aggregation and for per-capita point stats
+population:
+  source: {type: table, file: inputs/cell_indicators.csv, key: cell_id, column: population}
+
+# ── Indicators ────────────────────────────────────────────────
+# direction: ascending  → higher value = higher PTI score (higher priority)
+#            descending → higher value = lower PTI score
+indicators:
+  - id: poverty_headcount
+    label: Poverty headcount
+    category: Poverty & Welfare
+    direction: ascending
+    unit: "%"
+    level: cell
+    source_note: Small-area estimate, household survey 2024 (synthetic)
+    year: 2024
+    fill: median              # 3% of cells have no estimate
+    source: {type: table, file: inputs/cell_indicators.csv, key: cell_id, column: poverty_headcount}
+
+  - id: food_insecurity_phase
+    label: Food insecurity phase (IPC)
+    category: Poverty & Welfare
+    direction: ascending
+    unit: phase 1–5
+    level: region
+    source_note: Regional food security analysis (synthetic), joined on region name
+    year: 2025
+    # Phases are already ordered categories: score them directly
+    scoring: {type: categories, scores: {"1": 1, "2": 2, "3": 3, "4": 4, "5": 5}}
+    source: {type: table, file: inputs/region_food_security.csv, name_key: Region, column: food_insecurity_phase}
+
+  - id: travel_time_health
+    label: Travel time to health facility
+    category: Services & Access
+    direction: ascending
+    unit: minutes
+    level: cell
+    source_note: Cost-distance surface, mean per cell (synthetic raster)
+    year: 2025
+    source: {type: raster, file: inputs/travel_time_health.tif, stat: mean}
+
+  - id: facilities_per_1000
+    label: Health facilities per 1,000 people
+    category: Services & Access
+    direction: descending
+    unit: per 1,000
+    level: district
+    source_note: Facility registry points counted per district (synthetic)
+    source: {type: points, file: inputs/health_facilities.gpkg, stat: per_1000_pop}
+
+  - id: electricity_access
+    label: Electricity access
+    category: Services & Access
+    direction: descending
+    unit: "% households"
+    level: cell
+    source_note: Household survey 2024 (synthetic) — 5% of cells missing, no fill
+    year: 2024
+    source: {type: table, file: inputs/cell_indicators.csv, key: cell_id, column: electricity_access}
+
+  - id: population_density
+    label: Population per cell
+    category: Services & Access
+    direction: ascending
+    unit: people
+    level: cell
+    source_note: Gridded population (synthetic)
+    source: {type: table, file: inputs/cell_indicators.csv, key: cell_id, column: population}
+
+  - id: net_enrolment
+    label: Net primary enrolment
+    category: Human Development
+    direction: descending
+    unit: "%"
+    level: cell
+    source_note: Education census 2023 (synthetic)
+    year: 2023
+    source: {type: table, file: inputs/cell_indicators.csv, key: cell_id, column: net_enrolment}
+
+  - id: stunting_rate
+    label: Child stunting
+    category: Human Development
+    direction: ascending
+    unit: "% under-5"
+    level: district
+    source_note: Nutrition survey, representative at district level (synthetic)
+    year: 2023
+    source: {type: table, file: inputs/district_stats.csv, key: district_code, column: stunting_rate}
+
+  - id: flood_exposure
+    label: Flood exposure
+    category: Climate & Environment
+    direction: ascending
+    unit: index 0–100
+    level: cell
+    source_note: Hazard model (synthetic); classed on fixed policy thresholds
+    # Fixed thresholds instead of data-driven breaks: <10 / 10–25 / 25–40 / 40–60 / >60
+    scoring: {type: breaks, breaks: [10, 25, 40, 60]}
+    source: {type: table, file: inputs/cell_indicators.csv, key: cell_id, column: flood_exposure}
+
+  - id: ndvi_change
+    label: Vegetation change (NDVI)
+    category: Climate & Environment
+    direction: descending     # loss (negative values) = higher priority
+    unit: Δ NDVI 2015–2025
+    level: cell
+    source_note: Satellite-derived (synthetic) — negative values are valid
+    source: {type: table, file: inputs/cell_indicators.csv, key: cell_id, column: ndvi_change}
+
+  - id: conflict_events
+    label: Conflict events (3 years)
+    category: Fragility & Operations
+    direction: ascending
+    unit: events
+    level: cell
+    source_note: Event data, 2023–2025 (synthetic)
+    fill: zero
+    source: {type: table, file: inputs/cell_indicators.csv, key: cell_id, column: conflict_events_3y}
+
+  - id: operational_access
+    label: Operational access
+    category: Fragility & Operations
+    direction: ascending
+    unit: 0 = open, 1 = restricted
+    level: cell
+    source_note: >-
+      Security access map (synthetic). A political-economy constraint represented
+      as a layer: open areas score 5, restricted areas score 1.
+    scoring: {type: categories, scores: {"0": 5, "1": 1}}
+    source: {type: table, file: inputs/cell_indicators.csv, key: cell_id, column: restricted_access}
+
+# ── Map overlays ──────────────────────────────────────────────
+overlays:
+  - id: projects
+    label: Project portfolio
+    file: inputs/projects.gpkg
+    role: portfolio            # enables the portfolio-balance analysis
+    label_field: name
+    fields: [project_id, sector, status]
+    color: "#1e3a8a"
+  - id: facilities
+    label: Health facilities
+    file: inputs/health_facilities.gpkg
+    label_field: type
+    color: "#be185d"
+  - id: roads
+    label: Main roads
+    file: inputs/roads.gpkg
+    fields: [class]
+    color: "#57534e"
+  - id: towns
+    label: Towns
+    file: inputs/towns.gpkg
+    label_field: name
+    fields: [population_k]
+    color: "#0f172a"

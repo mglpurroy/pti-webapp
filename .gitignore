@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# Secrets and local state
+.env
+*.token
+arcgis_token.txt
+# Editors / OS
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+# Large raw inputs for real countries — keep them out of git
+prep/countries/*/inputs/
+app/data/_local_*/

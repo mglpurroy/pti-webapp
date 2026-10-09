@@ -1,0 +1,10 @@
+# Build a dataset (prep/build_dataset.py)
+geopandas>=0.14
+pandas>=2.0
+pyyaml>=6.0
+pyogrio>=0.7
+# Raster sources (type: raster) and the Demoland example
+rasterio>=1.3
+rasterstats>=0.19
+# ArcGIS sources and login (optional)
+requests>=2.31

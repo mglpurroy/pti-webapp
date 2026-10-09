@@ -1,0 +1,124 @@
+# Template: a country whose data lives in an ArcGIS web map (Data Explorer / Hub)
+#
+# 1. Sign in:          python prep/arcgis_login.py --portal https://<org>.maps.arcgis.com --client-id <id>
+#                      (or --paste a token)
+# 2. Draft entries:    python prep/list_webmap_layers.py <webmap item id> --portal https://<org>.maps.arcgis.com --yaml draft.yaml
+# 3. Copy the indicators you want from draft.yaml below, fill in the TODOs
+# 4. Check, then build: python prep/build_dataset.py prep/examples/arcgis_template/pti.yaml --check
+#
+# Every value in <angle brackets> is a placeholder.
+
+id: <country_id>
+output: ../../../app/data/<country_id>
+
+app:
+  title: Project Targeting Index
+  country: <Country>
+  subtitle: <Base unit>-level suitability modeller
+  default_level: <middle level key>
+  classes: 5
+  classification: quantile
+  min_coverage: 1.0
+  categories:
+    - {name: Health Access, color: "#e74c3c"}
+    - {name: Poverty, color: "#e67e22"}
+    - {name: Education, color: "#8e44ad"}
+  scenarios:
+    - id: core
+      label: Core PTI
+      description: <what this index is for>
+      weights: {<indicator_id>: 50, <indicator_id_2>: 50}
+  arcgis_publish:
+    portal: https://<org>.maps.arcgis.com
+  data_refresh_note:
+    text: Data is pulled from the <Country> Data Explorer web map with a portal sign-in, then rebuilt and redeployed.
+    command: python prep/build_dataset.py prep/examples/arcgis_template/pti.yaml
+
+levels:
+  - key: admin1
+    label: State
+    code: admin1_code
+    name: admin1_name
+    boundaries:
+      arcgis: https://services.arcgis.com/<org id>/arcgis/rest/services/<Admin1_Boundaries>/FeatureServer/0
+      code_field: <statecode>
+      name_field: <statename>
+  - key: admin2
+    label: LGA
+    code: admin2_code
+    name: admin2_name
+    boundaries:
+      arcgis: https://services.arcgis.com/<org id>/arcgis/rest/services/<Admin2_Boundaries>/FeatureServer/0
+      code_field: <lgacode>
+      name_field: <lganame>
+  - key: admin3
+    label: Ward
+    code: admin3_code
+    name: admin3_name
+    boundaries:
+      arcgis: https://services.arcgis.com/<org id>/arcgis/rest/services/<Ward_Boundaries>/FeatureServer/0
+      code_field: <wardcode>
+      name_field: <wardname>
+    # If the ward layer carries parent codes, use them instead of a spatial join:
+    parents: {admin1: <statecode>, admin2: <lgacode>}
+
+simplify: {admin3: 0.0005, admin2: 0.001, admin1: 0.002}
+
+population:
+  source:
+    type: arcgis
+    url: https://services.arcgis.com/<org id>/arcgis/rest/services/<Population>/FeatureServer/0
+    key: <wardcode>
+    column: <population_estimate>
+
+indicators:
+  # A ward-level layer keyed by ward code
+  - id: <poverty_rate_2023>
+    label: Poverty rate (2023)
+    category: Poverty
+    direction: ascending
+    level: admin3
+    unit: "%"
+    year: 2023
+    source_note: <survey / model and date>
+    source:
+      type: arcgis
+      url: https://services.arcgis.com/<org id>/arcgis/rest/services/<ward_indicators_2023>/FeatureServer/0
+      key: <wardcode>
+      column: <perc_pov_2023>
+
+  # A layer with no matching code, joined on names through the level's boundaries
+  - id: <flood_impact_population>
+    label: Expected annual flood impact — population
+    category: Climate Risk
+    direction: ascending
+    level: admin2
+    source_note: <hazard model, ADM2>
+    source:
+      type: arcgis
+      url: https://services.arcgis.com/<org id>/arcgis/rest/services/<Flood_Risk_ADM2>/FeatureServer/0
+      name_key: <adm2_name>
+      column: <EAI_population>
+      where: "<hazard_class> = 0"
+
+  # Several rows per unit (e.g. events): aggregate them
+  - id: <conflict_events>
+    label: Conflict events
+    category: Conflict
+    direction: ascending
+    level: admin3
+    fill: zero
+    source:
+      type: arcgis
+      url: https://services.arcgis.com/<org id>/arcgis/rest/services/<Ward_Violence>/FeatureServer/0
+      key: <wardcode>
+      column: <events>
+      agg: sum
+
+overlays:
+  - id: projects
+    label: World Bank projects
+    arcgis: https://services.arcgis.com/<org id>/arcgis/rest/services/<Project_Locations>/FeatureServer/0
+    role: portfolio
+    label_field: <project_name>
+    fields: [<project_id>, <sector>]

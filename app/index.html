@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PTI Builder</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css?v=3" />
+</head>
+<body>
+
+<!-- ════════════════ TOP BAR ════════════════ -->
+<header id="topbar">
+  <div class="topbar-left">
+    <div class="logo-mark">PTI</div>
+    <div class="topbar-title">
+      <span class="title-main" id="app-title">Project Targeting Index</span>
+      <span class="title-sub" id="app-subtitle">Loading…</span>
+    </div>
+  </div>
+  <div class="topbar-center">
+    <select id="dataset-select" class="tb-select tb-select-sm" style="display:none" title="Dataset"></select>
+    <label class="tb-label">PTI</label>
+    <select id="scenario-select" class="tb-select" title="Thematic PTI — a predefined set of indicators and weights"></select>
+    <label class="tb-label">Level</label>
+    <div class="tb-toggle" id="admin-toggle"></div>
+    <label class="tb-label">Aggregate by</label>
+    <div class="tb-toggle" id="weight-toggle">
+      <button class="tg active" data-weight="pop" title="Weight each base unit by population — the score describes the average person in the unit">Population</button>
+      <button class="tg" data-weight="equal" title="Unweighted mean of base-unit scores — the score describes the average unit">Equal</button>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div id="data-status" class="status-chip">Loading…</div>
+    <button id="calc-btn" class="calc-btn" disabled>
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><polygon points="3,1 13,7 3,13" fill="currentColor"/></svg>
+      Run PTI
+    </button>
+    <span id="last-run-label" class="last-run-label" style="display:none"></span>
+    <button id="save-run-btn" class="results-btn" style="display:none" title="Save this result to compare later">📌 Save</button>
+    <button id="results-toggle" class="results-btn" style="display:none">Results ↕</button>
+    <button id="about-btn" class="results-btn" title="Method, data dictionary and responsible use">ⓘ About</button>
+  </div>
+</header>
+
+<!-- ════════════════ SIDEBAR ════════════════ -->
+<aside id="sidebar">
+  <div class="sb-weight-bar">
+    <div class="sb-wt-label">
+      <span>Weights</span>
+      <span id="sel-count" class="muted">0 selected</span>
+    </div>
+    <div class="wbar-track"><div id="wbar-fill"></div></div>
+    <div class="wbar-sum">
+      <span id="weight-total">0</span> <span class="muted">/ 100</span>
+      <button id="equalize-btn" class="eq-btn" title="Distribute weights equally among selected indicators">= Equal</button>
+    </div>
+    <div class="sb-method">
+      <span class="sb-method-label" title="How each indicator is split into classes before scoring">Classes</span>
+      <div class="tb-toggle" id="reclass-toggle">
+        <button class="tg" data-reclass="quantile" title="Equal number of units per class">Quantile</button>
+        <button class="tg" data-reclass="equal" title="Equal-width value ranges">Equal</button>
+        <button class="tg" data-reclass="natural" title="Natural breaks (Jenks / ckmeans)">Natural</button>
+      </div>
+      <select id="nclass-select" class="sb-select" title="Number of classes per indicator (scores 1..N)">
+        <option value="3">3</option><option value="4">4</option><option value="5">5</option>
+        <option value="6">6</option><option value="7">7</option><option value="9">9</option>
+      </select>
+    </div>
+    <div id="scenario-hint" class="scenario-hint"></div>
+  </div>
+
+  <div id="indicator-panels">
+    <div class="ind-loading">Loading indicators…</div>
+  </div>
+
+  <details class="agol-section" id="refresh-section" style="display:none">
+    <summary>Refreshing the data</summary>
+    <div class="agol-form">
+      <p class="agol-note" id="refresh-note"></p>
+      <code class="agol-cmd" id="refresh-cmd"></code>
+    </div>
+  </details>
+</aside>
+
+<!-- ════════════════ MAP AREA ════════════════ -->
+<div id="map-area">
+  <div id="map-plotly"></div>
+  <div id="level-note" class="level-note"></div>
+
+  <div id="aoi-toolbar">
+    <button id="layers-btn" class="aoi-tool-btn" title="Context and portfolio layers">☰ Layers</button>
+    <button id="aoi-btn" class="aoi-tool-btn" title="Draw a selection to analyse a sub-area">&#9638; Select Area</button>
+    <button id="aoi-clear-btn" class="aoi-tool-btn aoi-clear" title="Clear selection" style="display:none">&#10005; Clear</button>
+  </div>
+
+  <div id="layers-panel" style="display:none">
+    <div class="aoi-panel-head"><span>Map layers</span><button class="aoi-close-btn" id="layers-close">✕</button></div>
+    <div id="layers-list"></div>
+    <div class="layers-sep">Colour map by</div>
+    <div id="mapvar-list">
+      <label class="lyr-row"><input type="radio" name="mapvar" value="pti" checked/> PTI score</label>
+      <label class="lyr-row"><input type="radio" name="mapvar" value="robust" disabled/> Robustness (run it first)</label>
+    </div>
+  </div>
+
+  <div id="aoi-panel" style="display:none">
+    <div class="aoi-panel-head">
+      <span id="aoi-title">Selected area</span>
+      <button class="aoi-close-btn" id="aoi-close">✕</button>
+    </div>
+    <div id="aoi-stats"></div>
+    <div id="aoi-hist"></div>
+  </div>
+
+  <!-- Unit profile: why a unit scores what it scores -->
+  <div id="unit-panel" style="display:none">
+    <div class="aoi-panel-head">
+      <span id="unit-title">Unit</span>
+      <button class="aoi-close-btn" id="unit-close">✕</button>
+    </div>
+    <div id="unit-body"></div>
+  </div>
+
+  <div id="map-legend">
+    <div class="legend-title" id="legend-title">PTI Score</div>
+    <div class="legend-scale">
+      <div class="legend-gradient" id="legend-gradient"></div>
+      <div class="legend-ticks" id="legend-ticks">
+        <span>0</span><span>25</span><span>50</span><span>75</span><span>100</span>
+      </div>
+    </div>
+    <div class="legend-labels"><span id="legend-low">Lower priority</span><span id="legend-high">Higher priority</span></div>
+    <div class="legend-stats" id="legend-stats"></div>
+    <div class="legend-caveat">Relative index — conditional on the selected indicators and weights.</div>
+  </div>
+
+  <div id="map-tooltip"></div>
+
+  <div id="map-empty">
+    <div class="empty-icon">🗺</div>
+    <div class="empty-title">Configure &amp; Run PTI</div>
+    <div class="empty-sub">Pick a thematic PTI or select indicators on the left, then click <strong>Run PTI</strong></div>
+  </div>
+
+  <!-- ── Results drawer ── -->
+  <div id="results-drawer" class="drawer-closed">
+    <div class="drawer-handle" id="drawer-handle">
+      <span class="handle-bar"></span>
+      <span id="drawer-label">Results</span>
+      <span id="coverage-chip" class="coverage-chip" style="display:none"></span>
+      <div class="drawer-tabs">
+        <button class="dtab active" data-panel="table">Table</button>
+        <button class="dtab" data-panel="dist">Distribution</button>
+        <button class="dtab" data-panel="robust">Robustness</button>
+        <button class="dtab" data-panel="portfolio" id="portfolio-tab" style="display:none">Portfolio</button>
+      </div>
+      <button class="drawer-close" id="drawer-close">✕</button>
+    </div>
+    <div class="drawer-body">
+      <div id="drawer-table" class="drawer-panel active">
+        <div class="dt-toolbar">
+          <input id="table-search" type="text" placeholder="Filter by name…" class="dt-search" />
+          <div class="dl-btns">
+            <button id="dl-csv" class="dl-btn" title="Scores at the level shown, as CSV">↓ CSV</button>
+            <button id="dl-csv-base" class="dl-btn" title="Every base unit with indicator values and class scores">↓ Full CSV</button>
+            <button id="dl-geojson" class="dl-btn" title="Scored polygons at the level shown, as GeoJSON">↓ GeoJSON</button>
+            <button id="dl-meta" class="dl-btn" title="Method, weights, breaks and data dictionary for this run">↓ Run notes</button>
+            <button id="agol-publish-btn" class="dl-btn agol-btn" style="display:none" title="Publish this result to ArcGIS Online / Enterprise">⬆ ArcGIS</button>
+          </div>
+        </div>
+        <div id="results-table-wrap"></div>
+      </div>
+
+      <div id="drawer-dist" class="drawer-panel">
+        <div id="compare-bar" style="display:none">
+          <span class="compare-label">Compare with saved run:</span>
+          <select id="compare-select"><option value="">— none —</option></select>
+          <button id="compare-clear" class="compare-clear-btn" style="display:none">✕ Clear</button>
+          <span id="compare-stats" class="compare-stats"></span>
+        </div>
+        <div id="dist-charts">
+          <div id="dist-hist-div"></div>
+          <div id="dist-bar-div"></div>
+        </div>
+      </div>
+
+      <div id="drawer-robust" class="drawer-panel">
+        <div class="dt-toolbar">
+          <span class="muted small">Re-runs the PTI with every weight randomly varied by ±<select id="rob-spread" class="mini-select">
+            <option value="0.25">25%</option><option value="0.5" selected>50%</option><option value="0.75">75%</option></select>
+            and counts how often each unit stays in the top <select id="rob-top" class="mini-select">
+            <option value="0.1">10%</option><option value="0.2" selected>20%</option><option value="0.3">30%</option></select>.</span>
+          <button id="rob-run" class="dl-btn agol-btn">Run robustness test</button>
+        </div>
+        <div id="robust-body" class="panel-body"><div class="muted panel-empty">Run the PTI, then the robustness test.</div></div>
+      </div>
+
+      <div id="drawer-portfolio" class="drawer-panel">
+        <div id="portfolio-body" class="panel-body"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── About / data dictionary ── -->
+<div id="about-modal-bg" class="modal-bg" style="display:none">
+  <div class="modal modal-wide">
+    <div class="agol-modal-head"><span>About this PTI</span><button class="agol-modal-close" data-close="about-modal-bg">✕</button></div>
+    <div class="modal-body" id="about-body"></div>
+  </div>
+</div>
+
+<!-- ── Publish to ArcGIS (optional, per dataset) ── -->
+<div id="agol-modal-bg" class="modal-bg" style="display:none">
+  <div id="agol-modal" class="modal">
+    <div class="agol-modal-head">
+      <span>Publish to ArcGIS</span>
+      <button class="agol-modal-close" data-close="agol-modal-bg">✕</button>
+    </div>
+    <div class="agol-modal-body">
+      <label class="agol-lbl">Layer title
+        <input id="agol-title" type="text" class="agol-input"/>
+      </label>
+      <label class="agol-lbl">Portal URL
+        <input id="agol-portal" type="text" class="agol-input"/>
+      </label>
+      <label class="agol-lbl">Your ArcGIS token
+        <input id="agol-token" type="password" class="agol-input" placeholder="Paste token here…" autocomplete="off"/>
+        <span class="agol-hint-link">Sign in to the portal, then open <em>&lt;portal&gt;/sharing/rest/generateToken</em>. The token is used once and never stored.</span>
+      </label>
+      <label class="agol-lbl agol-check-row">
+        <input type="checkbox" id="agol-with-geom" checked/>
+        Include polygons (GeoJSON layer) — otherwise a CSV table
+      </label>
+      <div id="agol-status"></div>
+    </div>
+    <div class="agol-modal-foot">
+      <button class="agol-cancel-btn" data-close="agol-modal-bg">Cancel</button>
+      <button class="agol-go-btn" id="agol-go-btn">Publish</button>
+    </div>
+  </div>
+</div>
+
+<script src="js/vendor/plotly-2.35.2.min.js"></script>
+<script src="js/vendor/simple-statistics.min.js"></script>
+<script src="js/pti-core.js?v=1"></script>
+<script src="js/app.js?v=6"></script>
+</body>
+</html>

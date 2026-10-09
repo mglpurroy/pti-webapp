@@ -1,0 +1,338 @@
+{
+  "id": "demoland",
+  "title": "Project Targeting Index",
+  "country": "Demoland",
+  "subtitle": "Synthetic demo data · 5 km grid",
+  "default_level": "district",
+  "classes": 5,
+  "classification": "quantile",
+  "min_coverage": 0.8,
+  "priority_labels": [
+    "Very low",
+    "Low",
+    "Moderate",
+    "High",
+    "Very high"
+  ],
+  "legend": {
+    "low": "Lower priority",
+    "high": "Higher priority"
+  },
+  "categories": [
+    {
+      "name": "Poverty & Welfare",
+      "color": "#e67e22"
+    },
+    {
+      "name": "Services & Access",
+      "color": "#2980b9"
+    },
+    {
+      "name": "Human Development",
+      "color": "#8e44ad"
+    },
+    {
+      "name": "Climate & Environment",
+      "color": "#16a085"
+    },
+    {
+      "name": "Fragility & Operations",
+      "color": "#c0392b"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "core",
+      "label": "Core PTI",
+      "description": "Multi-sector need — poverty, services and human development",
+      "weights": {
+        "poverty_headcount": 25,
+        "travel_time_health": 15,
+        "electricity_access": 15,
+        "net_enrolment": 15,
+        "stunting_rate": 15,
+        "food_insecurity_phase": 15
+      }
+    },
+    {
+      "id": "social",
+      "label": "Social Development PTI",
+      "description": "Poverty, education and nutrition",
+      "weights": {
+        "poverty_headcount": 40,
+        "net_enrolment": 30,
+        "stunting_rate": 30
+      }
+    },
+    {
+      "id": "energy",
+      "label": "Energy PTI",
+      "description": "Unserved population with productive potential",
+      "weights": {
+        "electricity_access": 50,
+        "population_density": 30,
+        "poverty_headcount": 20
+      }
+    },
+    {
+      "id": "nutrition",
+      "label": "Nutrition PTI",
+      "description": "Food insecurity, stunting and health access",
+      "weights": {
+        "food_insecurity_phase": 40,
+        "stunting_rate": 35,
+        "travel_time_health": 25
+      }
+    },
+    {
+      "id": "operable",
+      "label": "Core PTI + operational access",
+      "description": "Core need, discounted where field access is restricted (a spatial political-economy constraint)",
+      "weights": {
+        "poverty_headcount": 20,
+        "travel_time_health": 15,
+        "electricity_access": 10,
+        "net_enrolment": 10,
+        "stunting_rate": 10,
+        "food_insecurity_phase": 10,
+        "operational_access": 25
+      }
+    }
+  ],
+  "about": {
+    "disclaimer": "All data in this demo are synthetic. Demoland does not exist.",
+    "contact": ""
+  },
+  "arcgis_publish": {
+    "portal": "https://www.arcgis.com"
+  },
+  "levels": [
+    {
+      "key": "region",
+      "label": "Region",
+      "code": "region_code",
+      "name": "region_name"
+    },
+    {
+      "key": "district",
+      "label": "District",
+      "code": "district_code",
+      "name": "district_name"
+    },
+    {
+      "key": "cell",
+      "label": "Grid cell",
+      "code": "cell_id",
+      "name": "cell_name"
+    }
+  ],
+  "population_field": "population",
+  "indicators": [
+    {
+      "id": "poverty_headcount",
+      "label": "Poverty headcount",
+      "category": "Poverty & Welfare",
+      "direction": "ascending",
+      "unit": "%",
+      "level": "cell",
+      "source_note": "Small-area estimate, household survey 2024 (synthetic)",
+      "year": 2024,
+      "fill": "median",
+      "source_type": "table"
+    },
+    {
+      "id": "food_insecurity_phase",
+      "label": "Food insecurity phase (IPC)",
+      "category": "Poverty & Welfare",
+      "direction": "ascending",
+      "unit": "phase 1–5",
+      "level": "region",
+      "source_note": "Regional food security analysis (synthetic), joined on region name",
+      "year": 2025,
+      "scoring": {
+        "type": "categories",
+        "scores": {
+          "1": 1,
+          "2": 2,
+          "3": 3,
+          "4": 4,
+          "5": 5
+        }
+      },
+      "source_type": "table"
+    },
+    {
+      "id": "travel_time_health",
+      "label": "Travel time to health facility",
+      "category": "Services & Access",
+      "direction": "ascending",
+      "unit": "minutes",
+      "level": "cell",
+      "source_note": "Cost-distance surface, mean per cell (synthetic raster)",
+      "year": 2025,
+      "source_type": "raster"
+    },
+    {
+      "id": "facilities_per_1000",
+      "label": "Health facilities per 1,000 people",
+      "category": "Services & Access",
+      "direction": "descending",
+      "unit": "per 1,000",
+      "level": "district",
+      "source_note": "Facility registry points counted per district (synthetic)",
+      "source_type": "points"
+    },
+    {
+      "id": "electricity_access",
+      "label": "Electricity access",
+      "category": "Services & Access",
+      "direction": "descending",
+      "unit": "% households",
+      "level": "cell",
+      "source_note": "Household survey 2024 (synthetic) — 5% of cells missing, no fill",
+      "year": 2024,
+      "source_type": "table"
+    },
+    {
+      "id": "population_density",
+      "label": "Population per cell",
+      "category": "Services & Access",
+      "direction": "ascending",
+      "unit": "people",
+      "level": "cell",
+      "source_note": "Gridded population (synthetic)",
+      "source_type": "table"
+    },
+    {
+      "id": "net_enrolment",
+      "label": "Net primary enrolment",
+      "category": "Human Development",
+      "direction": "descending",
+      "unit": "%",
+      "level": "cell",
+      "source_note": "Education census 2023 (synthetic)",
+      "year": 2023,
+      "source_type": "table"
+    },
+    {
+      "id": "stunting_rate",
+      "label": "Child stunting",
+      "category": "Human Development",
+      "direction": "ascending",
+      "unit": "% under-5",
+      "level": "district",
+      "source_note": "Nutrition survey, representative at district level (synthetic)",
+      "year": 2023,
+      "source_type": "table"
+    },
+    {
+      "id": "flood_exposure",
+      "label": "Flood exposure",
+      "category": "Climate & Environment",
+      "direction": "ascending",
+      "unit": "index 0–100",
+      "level": "cell",
+      "source_note": "Hazard model (synthetic); classed on fixed policy thresholds",
+      "scoring": {
+        "type": "breaks",
+        "breaks": [
+          10,
+          25,
+          40,
+          60
+        ]
+      },
+      "source_type": "table"
+    },
+    {
+      "id": "ndvi_change",
+      "label": "Vegetation change (NDVI)",
+      "category": "Climate & Environment",
+      "direction": "descending",
+      "unit": "Δ NDVI 2015–2025",
+      "level": "cell",
+      "source_note": "Satellite-derived (synthetic) — negative values are valid",
+      "source_type": "table"
+    },
+    {
+      "id": "conflict_events",
+      "label": "Conflict events (3 years)",
+      "category": "Fragility & Operations",
+      "direction": "ascending",
+      "unit": "events",
+      "level": "cell",
+      "source_note": "Event data, 2023–2025 (synthetic)",
+      "fill": "zero",
+      "source_type": "table"
+    },
+    {
+      "id": "operational_access",
+      "label": "Operational access",
+      "category": "Fragility & Operations",
+      "direction": "ascending",
+      "unit": "0 = open, 1 = restricted",
+      "level": "cell",
+      "source_note": "Security access map (synthetic). A political-economy constraint represented as a layer: open areas score 5, restricted areas score 1.",
+      "scoring": {
+        "type": "categories",
+        "scores": {
+          "0": 5,
+          "1": 1
+        }
+      },
+      "source_type": "table"
+    }
+  ],
+  "overlays": [
+    {
+      "id": "projects",
+      "label": "Project portfolio",
+      "role": "portfolio",
+      "label_field": "name",
+      "color": "#1e3a8a",
+      "geometry": "point",
+      "file": "overlay_projects.geojson",
+      "fields": [
+        "name",
+        "project_id",
+        "sector",
+        "status",
+        "_unit"
+      ]
+    },
+    {
+      "id": "facilities",
+      "label": "Health facilities",
+      "label_field": "type",
+      "color": "#be185d",
+      "geometry": "point",
+      "file": "overlay_facilities.geojson",
+      "fields": [
+        "type"
+      ]
+    },
+    {
+      "id": "roads",
+      "label": "Main roads",
+      "color": "#57534e",
+      "geometry": "line",
+      "file": "overlay_roads.geojson",
+      "fields": [
+        "class"
+      ]
+    },
+    {
+      "id": "towns",
+      "label": "Towns",
+      "label_field": "name",
+      "color": "#0f172a",
+      "geometry": "point",
+      "file": "overlay_towns.geojson",
+      "fields": [
+        "name",
+        "population_k"
+      ]
+    }
+  ],
+  "built": "2026-10-09 17:37"
+}
