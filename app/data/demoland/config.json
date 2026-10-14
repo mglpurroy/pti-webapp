@@ -4,21 +4,10 @@
   "country": "Demoland",
   "subtitle": "Synthetic demo data · 5 km grid",
   "default_level": "district",
-  "classes": 5,
-  "classification": "quantile",
-  "min_coverage": 0.8,
-  "priority_labels": [
-    "Very low",
-    "Low",
-    "Moderate",
-    "High",
-    "Very high"
-  ],
-  "legend": {
-    "low": "Lower priority",
-    "high": "Higher priority"
-  },
-  "categories": [
+  "bins": 5,
+  "missing": "no_priority",
+  "cross_level": "project",
+  "pillars": [
     {
       "name": "Poverty & Welfare",
       "color": "#e67e22"
@@ -44,14 +33,14 @@
     {
       "id": "core",
       "label": "Core PTI",
-      "description": "Multi-sector need — poverty, services and human development",
+      "description": "Multi-sector need — poverty weighted double",
       "weights": {
-        "poverty_headcount": 25,
-        "travel_time_health": 15,
-        "electricity_access": 15,
-        "net_enrolment": 15,
-        "stunting_rate": 15,
-        "food_insecurity_phase": 15
+        "poverty_headcount": 2,
+        "travel_time_health": 1,
+        "electricity_access": -1,
+        "net_enrolment": -1,
+        "stunting_rate": 1,
+        "food_insecurity_phase": 1
       }
     },
     {
@@ -59,19 +48,19 @@
       "label": "Social Development PTI",
       "description": "Poverty, education and nutrition",
       "weights": {
-        "poverty_headcount": 40,
-        "net_enrolment": 30,
-        "stunting_rate": 30
+        "poverty_headcount": 2,
+        "net_enrolment": -1,
+        "stunting_rate": 1
       }
     },
     {
       "id": "energy",
       "label": "Energy PTI",
-      "description": "Unserved population with productive potential",
+      "description": "Unserved, populous and poor areas",
       "weights": {
-        "electricity_access": 50,
-        "population_density": 30,
-        "poverty_headcount": 20
+        "electricity_access": -2,
+        "population_count": 1,
+        "poverty_headcount": 1
       }
     },
     {
@@ -79,33 +68,33 @@
       "label": "Nutrition PTI",
       "description": "Food insecurity, stunting and health access",
       "weights": {
-        "food_insecurity_phase": 40,
-        "stunting_rate": 35,
-        "travel_time_health": 25
+        "food_insecurity_phase": 2,
+        "stunting_rate": 2,
+        "travel_time_health": 1
       }
     },
     {
       "id": "operable",
       "label": "Core PTI + operational access",
-      "description": "Core need, discounted where field access is restricted (a spatial political-economy constraint)",
+      "description": "Core need, lowered where field access is restricted",
       "weights": {
-        "poverty_headcount": 20,
-        "travel_time_health": 15,
-        "electricity_access": 10,
-        "net_enrolment": 10,
-        "stunting_rate": 10,
-        "food_insecurity_phase": 10,
-        "operational_access": 25
+        "poverty_headcount": 2,
+        "travel_time_health": 1,
+        "electricity_access": -1,
+        "net_enrolment": -1,
+        "stunting_rate": 1,
+        "food_insecurity_phase": 1,
+        "restricted_access": -2
       }
     }
   ],
   "about": {
-    "disclaimer": "All data in this demo are synthetic. Demoland does not exist.",
-    "contact": ""
+    "disclaimer": "All data in this demo are synthetic. Demoland does not exist."
   },
   "arcgis_publish": {
     "portal": "https://www.arcgis.com"
   },
+  "method": "devPTIpack",
   "levels": [
     {
       "key": "region",
@@ -126,161 +115,226 @@
       "name": "cell_name"
     }
   ],
-  "population_field": "population",
+  "population": true,
   "indicators": [
     {
       "id": "poverty_headcount",
       "label": "Poverty headcount",
-      "category": "Poverty & Welfare",
-      "direction": "ascending",
+      "pillar": "Poverty & Welfare",
+      "higher_is_worse": true,
       "unit": "%",
-      "level": "cell",
-      "source_note": "Small-area estimate, household survey 2024 (synthetic)",
       "year": 2024,
+      "source_note": "Small-area estimate, household survey 2024 (synthetic)",
       "fill": "median",
-      "source_type": "table"
+      "levels": [
+        "region",
+        "district",
+        "cell"
+      ],
+      "provenance": {
+        "cell": "table cell_indicators.csv",
+        "district": "population-weighted mean of grid cell values",
+        "region": "population-weighted mean of grid cell values"
+      },
+      "filled": {
+        "cell": 68
+      }
     },
     {
       "id": "food_insecurity_phase",
       "label": "Food insecurity phase (IPC)",
-      "category": "Poverty & Welfare",
-      "direction": "ascending",
+      "pillar": "Poverty & Welfare",
+      "higher_is_worse": true,
       "unit": "phase 1–5",
-      "level": "region",
-      "source_note": "Regional food security analysis (synthetic), joined on region name",
       "year": 2025,
-      "scoring": {
-        "type": "categories",
-        "scores": {
-          "1": 1,
-          "2": 2,
-          "3": 3,
-          "4": 4,
-          "5": 5
-        }
-      },
-      "source_type": "table"
+      "source_note": "Regional food security analysis (synthetic), joined on region name",
+      "levels": [
+        "region"
+      ],
+      "provenance": {
+        "region": "table region_food_security.csv"
+      }
     },
     {
       "id": "travel_time_health",
       "label": "Travel time to health facility",
-      "category": "Services & Access",
-      "direction": "ascending",
+      "pillar": "Services & Access",
+      "higher_is_worse": true,
       "unit": "minutes",
-      "level": "cell",
-      "source_note": "Cost-distance surface, mean per cell (synthetic raster)",
       "year": 2025,
-      "source_type": "raster"
+      "source_note": "Cost-distance surface (synthetic raster), mean per unit",
+      "levels": [
+        "region",
+        "district",
+        "cell"
+      ],
+      "provenance": {
+        "cell": "raster mean of travel_time_health.tif",
+        "region": "population-weighted mean of grid cell values",
+        "district": "raster mean of travel_time_health.tif"
+      }
     },
     {
       "id": "facilities_per_1000",
       "label": "Health facilities per 1,000 people",
-      "category": "Services & Access",
-      "direction": "descending",
+      "pillar": "Services & Access",
+      "higher_is_worse": false,
       "unit": "per 1,000",
-      "level": "district",
-      "source_note": "Facility registry points counted per district (synthetic)",
-      "source_type": "points"
+      "source_note": "Facility registry points counted per unit (synthetic)",
+      "levels": [
+        "region",
+        "district"
+      ],
+      "provenance": {
+        "district": "points (per_1000_pop) from health_facilities.gpkg",
+        "region": "points (per_1000_pop) from health_facilities.gpkg"
+      }
     },
     {
       "id": "electricity_access",
       "label": "Electricity access",
-      "category": "Services & Access",
-      "direction": "descending",
+      "pillar": "Services & Access",
+      "higher_is_worse": false,
       "unit": "% households",
-      "level": "cell",
-      "source_note": "Household survey 2024 (synthetic) — 5% of cells missing, no fill",
       "year": 2024,
-      "source_type": "table"
+      "source_note": "Household survey 2024 (synthetic) — 5% of cells missing, not filled",
+      "levels": [
+        "region",
+        "district",
+        "cell"
+      ],
+      "provenance": {
+        "cell": "table cell_indicators.csv",
+        "district": "population-weighted mean of grid cell values",
+        "region": "population-weighted mean of grid cell values"
+      }
     },
     {
-      "id": "population_density",
-      "label": "Population per cell",
-      "category": "Services & Access",
-      "direction": "ascending",
+      "id": "population_count",
+      "label": "Population",
+      "pillar": "Services & Access",
+      "higher_is_worse": true,
       "unit": "people",
-      "level": "cell",
       "source_note": "Gridded population (synthetic)",
-      "source_type": "table"
+      "levels": [
+        "region",
+        "district",
+        "cell"
+      ],
+      "provenance": {
+        "cell": "table cell_indicators.csv",
+        "district": "sum of grid cell values",
+        "region": "sum of grid cell values"
+      }
     },
     {
       "id": "net_enrolment",
       "label": "Net primary enrolment",
-      "category": "Human Development",
-      "direction": "descending",
+      "pillar": "Human Development",
+      "higher_is_worse": false,
       "unit": "%",
-      "level": "cell",
-      "source_note": "Education census 2023 (synthetic)",
       "year": 2023,
-      "source_type": "table"
+      "source_note": "Education census 2023 (synthetic)",
+      "levels": [
+        "region",
+        "district",
+        "cell"
+      ],
+      "provenance": {
+        "cell": "table cell_indicators.csv",
+        "district": "population-weighted mean of grid cell values",
+        "region": "population-weighted mean of grid cell values"
+      }
     },
     {
       "id": "stunting_rate",
       "label": "Child stunting",
-      "category": "Human Development",
-      "direction": "ascending",
+      "pillar": "Human Development",
+      "higher_is_worse": true,
       "unit": "% under-5",
-      "level": "district",
-      "source_note": "Nutrition survey, representative at district level (synthetic)",
       "year": 2023,
-      "source_type": "table"
+      "source_note": "Nutrition survey, representative at district level (synthetic)",
+      "levels": [
+        "region",
+        "district"
+      ],
+      "provenance": {
+        "district": "table district_stats.csv",
+        "region": "population-weighted mean of district values"
+      }
     },
     {
       "id": "flood_exposure",
       "label": "Flood exposure",
-      "category": "Climate & Environment",
-      "direction": "ascending",
+      "pillar": "Climate & Environment",
+      "higher_is_worse": true,
       "unit": "index 0–100",
-      "level": "cell",
-      "source_note": "Hazard model (synthetic); classed on fixed policy thresholds",
-      "scoring": {
-        "type": "breaks",
-        "breaks": [
-          10,
-          25,
-          40,
-          60
-        ]
-      },
-      "source_type": "table"
+      "source_note": "Hazard model (synthetic)",
+      "levels": [
+        "region",
+        "district",
+        "cell"
+      ],
+      "provenance": {
+        "cell": "table cell_indicators.csv",
+        "district": "area-weighted mean of grid cell values",
+        "region": "area-weighted mean of grid cell values"
+      }
     },
     {
       "id": "ndvi_change",
       "label": "Vegetation change (NDVI)",
-      "category": "Climate & Environment",
-      "direction": "descending",
+      "pillar": "Climate & Environment",
+      "higher_is_worse": false,
       "unit": "Δ NDVI 2015–2025",
-      "level": "cell",
       "source_note": "Satellite-derived (synthetic) — negative values are valid",
-      "source_type": "table"
+      "levels": [
+        "region",
+        "district",
+        "cell"
+      ],
+      "provenance": {
+        "cell": "table cell_indicators.csv",
+        "district": "area-weighted mean of grid cell values",
+        "region": "area-weighted mean of grid cell values"
+      }
     },
     {
       "id": "conflict_events",
       "label": "Conflict events (3 years)",
-      "category": "Fragility & Operations",
-      "direction": "ascending",
+      "pillar": "Fragility & Operations",
+      "higher_is_worse": true,
       "unit": "events",
-      "level": "cell",
       "source_note": "Event data, 2023–2025 (synthetic)",
       "fill": "zero",
-      "source_type": "table"
+      "levels": [
+        "region",
+        "district",
+        "cell"
+      ],
+      "provenance": {
+        "cell": "table cell_indicators.csv",
+        "district": "sum of grid cell values",
+        "region": "sum of grid cell values"
+      }
     },
     {
-      "id": "operational_access",
-      "label": "Operational access",
-      "category": "Fragility & Operations",
-      "direction": "ascending",
-      "unit": "0 = open, 1 = restricted",
-      "level": "cell",
-      "source_note": "Security access map (synthetic). A political-economy constraint represented as a layer: open areas score 5, restricted areas score 1.",
-      "scoring": {
-        "type": "categories",
-        "scores": {
-          "0": 5,
-          "1": 1
-        }
-      },
-      "source_type": "table"
+      "id": "restricted_access",
+      "label": "Restricted field access",
+      "pillar": "Fragility & Operations",
+      "higher_is_worse": false,
+      "unit": "share of area",
+      "source_note": "Security access map (synthetic): 1 = restricted. A spatial operational constraint — give it a negative weight to lower priority where access is restricted.",
+      "levels": [
+        "region",
+        "district",
+        "cell"
+      ],
+      "provenance": {
+        "cell": "table cell_indicators.csv",
+        "district": "area-weighted mean of grid cell values",
+        "region": "area-weighted mean of grid cell values"
+      }
     }
   ],
   "overlays": [
@@ -334,5 +388,5 @@
       ]
     }
   ],
-  "built": "2026-10-09 17:37"
+  "built": "2026-10-13 22:10"
 }

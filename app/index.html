@@ -6,7 +6,7 @@
   <title>PTI Builder</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/style.css?v=3" />
+  <link rel="stylesheet" href="css/style.css?v=10" />
 </head>
 <body>
 
@@ -21,15 +21,15 @@
   </div>
   <div class="topbar-center">
     <select id="dataset-select" class="tb-select tb-select-sm" style="display:none" title="Dataset"></select>
-    <label class="tb-label">PTI</label>
-    <select id="scenario-select" class="tb-select" title="Thematic PTI — a predefined set of indicators and weights"></select>
+    <label class="tb-label">Weights</label>
+    <select id="scenario-select" class="tb-select" title="Weighting scheme — a predefined set of indicators and signed weights"></select>
     <label class="tb-label">Level</label>
     <div class="tb-toggle" id="admin-toggle"></div>
-    <label class="tb-label">Aggregate by</label>
-    <div class="tb-toggle" id="weight-toggle">
-      <button class="tg active" data-weight="pop" title="Weight each base unit by population — the score describes the average person in the unit">Population</button>
-      <button class="tg" data-weight="equal" title="Unweighted mean of base-unit scores — the score describes the average unit">Equal</button>
-    </div>
+    <label class="tb-label" for="bins-select">Groups</label>
+    <select id="bins-select" class="tb-select tb-select-xs" title="Number of priority groups (equal-size quantiles)">
+      <option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+      <option>7</option><option>8</option><option>9</option><option>10</option>
+    </select>
   </div>
   <div class="topbar-right">
     <div id="data-status" class="status-chip">Loading…</div>
@@ -38,7 +38,7 @@
       Run PTI
     </button>
     <span id="last-run-label" class="last-run-label" style="display:none"></span>
-    <button id="save-run-btn" class="results-btn" style="display:none" title="Save this result to compare later">📌 Save</button>
+    <button id="save-run-btn" class="results-btn" style="display:none" title="Save these weights to compare later">📌 Save</button>
     <button id="results-toggle" class="results-btn" style="display:none">Results ↕</button>
     <button id="about-btn" class="results-btn" title="Method, data dictionary and responsible use">ⓘ About</button>
   </div>
@@ -51,22 +51,14 @@
       <span>Weights</span>
       <span id="sel-count" class="muted">0 selected</span>
     </div>
-    <div class="wbar-track"><div id="wbar-fill"></div></div>
-    <div class="wbar-sum">
-      <span id="weight-total">0</span> <span class="muted">/ 100</span>
-      <button id="equalize-btn" class="eq-btn" title="Distribute weights equally among selected indicators">= Equal</button>
+    <div class="wt-help">
+      <span class="wt-pos">+</span> higher value → higher priority ·
+      <span class="wt-neg">−</span> higher value → lower priority ·
+      size = relative importance
     </div>
-    <div class="sb-method">
-      <span class="sb-method-label" title="How each indicator is split into classes before scoring">Classes</span>
-      <div class="tb-toggle" id="reclass-toggle">
-        <button class="tg" data-reclass="quantile" title="Equal number of units per class">Quantile</button>
-        <button class="tg" data-reclass="equal" title="Equal-width value ranges">Equal</button>
-        <button class="tg" data-reclass="natural" title="Natural breaks (Jenks / ckmeans)">Natural</button>
-      </div>
-      <select id="nclass-select" class="sb-select" title="Number of classes per indicator (scores 1..N)">
-        <option value="3">3</option><option value="4">4</option><option value="5">5</option>
-        <option value="6">6</option><option value="7">7</option><option value="9">9</option>
-      </select>
+    <div class="wt-actions">
+      <button id="unit-weights-btn" class="eq-btn" title="Set every selected weight to +1 or −1, keeping its sign">±1</button>
+      <button id="clear-weights-btn" class="eq-btn" title="Unselect every indicator">Clear</button>
     </div>
     <div id="scenario-hint" class="scenario-hint"></div>
   </div>
@@ -90,19 +82,23 @@
   <div id="level-note" class="level-note"></div>
 
   <div id="aoi-toolbar">
-    <button id="layers-btn" class="aoi-tool-btn" title="Context and portfolio layers">☰ Layers</button>
+    <button id="layers-btn" class="aoi-tool-btn" title="Map variable, context and portfolio layers">☰ Layers</button>
     <button id="aoi-btn" class="aoi-tool-btn" title="Draw a selection to analyse a sub-area">&#9638; Select Area</button>
     <button id="aoi-clear-btn" class="aoi-tool-btn aoi-clear" title="Clear selection" style="display:none">&#10005; Clear</button>
   </div>
 
   <div id="layers-panel" style="display:none">
-    <div class="aoi-panel-head"><span>Map layers</span><button class="aoi-close-btn" id="layers-close">✕</button></div>
-    <div id="layers-list"></div>
+    <div class="aoi-panel-head"><span>Map</span><button class="aoi-close-btn" id="layers-close">✕</button></div>
     <div class="layers-sep">Colour map by</div>
     <div id="mapvar-list">
-      <label class="lyr-row"><input type="radio" name="mapvar" value="pti" checked/> PTI score</label>
-      <label class="lyr-row"><input type="radio" name="mapvar" value="robust" disabled/> Robustness (run it first)</label>
+      <label class="lyr-row"><input type="radio" name="mapvar" value="priority" checked/> PTI priority group</label>
+      <label class="lyr-row"><input type="radio" name="mapvar" value="score"/> PTI score</label>
+      <label class="lyr-row"><input type="radio" name="mapvar" value="robust" disabled/> <span>Robustness (run it first)</span></label>
+      <label class="lyr-row"><input type="radio" name="mapvar" value="indicator"/> Indicator</label>
+      <select id="explorer-select" class="sb-select explorer-select"></select>
     </div>
+    <div class="layers-sep">Layers</div>
+    <div id="layers-list"></div>
   </div>
 
   <div id="aoi-panel" style="display:none">
@@ -114,7 +110,6 @@
     <div id="aoi-hist"></div>
   </div>
 
-  <!-- Unit profile: why a unit scores what it scores -->
   <div id="unit-panel" style="display:none">
     <div class="aoi-panel-head">
       <span id="unit-title">Unit</span>
@@ -124,24 +119,22 @@
   </div>
 
   <div id="map-legend">
-    <div class="legend-title" id="legend-title">PTI Score</div>
-    <div class="legend-scale">
+    <div class="legend-title" id="legend-title">PTI priority</div>
+    <div id="legend-classes"></div>
+    <div id="legend-continuous" style="display:none">
       <div class="legend-gradient" id="legend-gradient"></div>
-      <div class="legend-ticks" id="legend-ticks">
-        <span>0</span><span>25</span><span>50</span><span>75</span><span>100</span>
-      </div>
+      <div class="legend-ticks" id="legend-ticks"></div>
+      <div class="legend-labels"><span id="legend-low"></span><span id="legend-high"></span></div>
     </div>
-    <div class="legend-labels"><span id="legend-low">Lower priority</span><span id="legend-high">Higher priority</span></div>
-    <div class="legend-stats" id="legend-stats"></div>
-    <div class="legend-caveat">Relative index — conditional on the selected indicators and weights.</div>
+    <div class="legend-caveat" id="legend-caveat">Relative ranking — depends on the indicators and weights chosen.</div>
   </div>
 
   <div id="map-tooltip"></div>
 
   <div id="map-empty">
     <div class="empty-icon">🗺</div>
-    <div class="empty-title">Configure &amp; Run PTI</div>
-    <div class="empty-sub">Pick a thematic PTI or select indicators on the left, then click <strong>Run PTI</strong></div>
+    <div class="empty-title">Set weights &amp; run the PTI</div>
+    <div class="empty-sub">Pick a weighting scheme or give indicators a weight on the left, then click <strong>Run PTI</strong></div>
   </div>
 
   <!-- ── Results drawer ── -->
@@ -153,7 +146,7 @@
       <div class="drawer-tabs">
         <button class="dtab active" data-panel="table">Table</button>
         <button class="dtab" data-panel="dist">Distribution</button>
-        <button class="dtab" data-panel="robust">Robustness</button>
+        <button class="dtab" data-panel="robust">Sensitivity</button>
         <button class="dtab" data-panel="portfolio" id="portfolio-tab" style="display:none">Portfolio</button>
       </div>
       <button class="drawer-close" id="drawer-close">✕</button>
@@ -163,10 +156,10 @@
         <div class="dt-toolbar">
           <input id="table-search" type="text" placeholder="Filter by name…" class="dt-search" />
           <div class="dl-btns">
-            <button id="dl-csv" class="dl-btn" title="Scores at the level shown, as CSV">↓ CSV</button>
-            <button id="dl-csv-base" class="dl-btn" title="Every base unit with indicator values and class scores">↓ Full CSV</button>
-            <button id="dl-geojson" class="dl-btn" title="Scored polygons at the level shown, as GeoJSON">↓ GeoJSON</button>
-            <button id="dl-meta" class="dl-btn" title="Method, weights, breaks and data dictionary for this run">↓ Run notes</button>
+            <button id="dl-csv" class="dl-btn" title="PTI scores and priority groups at the level shown">↓ CSV</button>
+            <button id="dl-csv-z" class="dl-btn" title="Every indicator's value, z-score, weight and term at the level shown">↓ Indicators CSV</button>
+            <button id="dl-geojson" class="dl-btn" title="Scored polygons at the level shown">↓ GeoJSON</button>
+            <button id="dl-meta" class="dl-btn" title="Method, weights, normalisation and group breaks for this run">↓ Run notes</button>
             <button id="agol-publish-btn" class="dl-btn agol-btn" style="display:none" title="Publish this result to ArcGIS Online / Enterprise">⬆ ArcGIS</button>
           </div>
         </div>
@@ -174,12 +167,6 @@
       </div>
 
       <div id="drawer-dist" class="drawer-panel">
-        <div id="compare-bar" style="display:none">
-          <span class="compare-label">Compare with saved run:</span>
-          <select id="compare-select"><option value="">— none —</option></select>
-          <button id="compare-clear" class="compare-clear-btn" style="display:none">✕ Clear</button>
-          <span id="compare-stats" class="compare-stats"></span>
-        </div>
         <div id="dist-charts">
           <div id="dist-hist-div"></div>
           <div id="dist-bar-div"></div>
@@ -187,14 +174,24 @@
       </div>
 
       <div id="drawer-robust" class="drawer-panel">
-        <div class="dt-toolbar">
-          <span class="muted small">Re-runs the PTI with every weight randomly varied by ±<select id="rob-spread" class="mini-select">
-            <option value="0.25">25%</option><option value="0.5" selected>50%</option><option value="0.75">75%</option></select>
-            and counts how often each unit stays in the top <select id="rob-top" class="mini-select">
-            <option value="0.1">10%</option><option value="0.2" selected>20%</option><option value="0.3">30%</option></select>.</span>
-          <button id="rob-run" class="dl-btn agol-btn">Run robustness test</button>
+        <div class="sens-block">
+          <div class="sens-head">
+            <b>Compare weighting schemes</b>
+            <span class="muted small">Rank correlation and Priority 1 overlap between this run and another scheme, at the level shown.</span>
+          </div>
+          <div class="sens-row">
+            <select id="compare-select" class="mini-select"><option value="">— pick a scheme or saved run —</option></select>
+            <span id="compare-stats" class="compare-stats"></span>
+          </div>
         </div>
-        <div id="robust-body" class="panel-body"><div class="muted panel-empty">Run the PTI, then the robustness test.</div></div>
+        <div class="dt-toolbar">
+          <span class="muted small">Random weights: re-run the PTI 200 times with every weight varied by ±<select id="rob-spread" class="mini-select">
+            <option value="0.25">25%</option><option value="0.5" selected>50%</option><option value="0.75">75%</option></select>
+            (signs kept) and count how often each unit stays in the top <select id="rob-top" class="mini-select">
+            <option value="0.1">10%</option><option value="0.2" selected>20%</option><option value="0.3">30%</option></select>.</span>
+          <button id="rob-run" class="dl-btn agol-btn">Run</button>
+        </div>
+        <div id="robust-body" class="panel-body"><div class="muted panel-empty">Run the PTI first.</div></div>
       </div>
 
       <div id="drawer-portfolio" class="drawer-panel">
@@ -244,8 +241,7 @@
 </div>
 
 <script src="js/vendor/plotly-2.35.2.min.js"></script>
-<script src="js/vendor/simple-statistics.min.js"></script>
-<script src="js/pti-core.js?v=1"></script>
-<script src="js/app.js?v=6"></script>
+<script src="js/pti-core.js?v=10"></script>
+<script src="js/app.js?v=10"></script>
 </body>
 </html>

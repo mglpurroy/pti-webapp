@@ -7,6 +7,11 @@
 # 4. Check, then build: python prep/build_dataset.py prep/examples/arcgis_template/pti.yaml --check
 #
 # Every value in <angle brackets> is a placeholder.
+#
+# Method reminder (devPTIpack): indicators are z-scored among the units of each
+# level they are available at. The app never aggregates upward, so prepare
+# every level you want the PTI shown at: supply it (`sources:`) or aggregate
+# it here from the level it was measured at (`aggregate_to:`).
 
 id: <country_id>
 output: ../../../app/data/<country_id>
@@ -14,20 +19,19 @@ output: ../../../app/data/<country_id>
 app:
   title: Project Targeting Index
   country: <Country>
-  subtitle: <Base unit>-level suitability modeller
-  default_level: <middle level key>
-  classes: 5
-  classification: quantile
-  min_coverage: 1.0
-  categories:
+  subtitle: <Base unit>-level PTI
+  default_level: admin2
+  bins: 5
+  missing: no_priority
+  pillars:
     - {name: Health Access, color: "#e74c3c"}
     - {name: Poverty, color: "#e67e22"}
-    - {name: Education, color: "#8e44ad"}
+    - {name: Climate Risk, color: "#16a085"}
   scenarios:
     - id: core
       label: Core PTI
-      description: <what this index is for>
-      weights: {<indicator_id>: 50, <indicator_id_2>: 50}
+      description: <what this weighting is for>
+      weights: {<poverty_rate_2023>: 2, <travel_time_hospital>: 1, <access_electricity>: -1}
   arcgis_publish:
     portal: https://<org>.maps.arcgis.com
   data_refresh_note:
@@ -51,6 +55,8 @@ levels:
       arcgis: https://services.arcgis.com/<org id>/arcgis/rest/services/<Admin2_Boundaries>/FeatureServer/0
       code_field: <lgacode>
       name_field: <lganame>
+      # parent codes already on the layer — used instead of a spatial join
+    parents: {admin1: <statecode>}
   - key: admin3
     label: Ward
     code: admin3_code
@@ -59,12 +65,12 @@ levels:
       arcgis: https://services.arcgis.com/<org id>/arcgis/rest/services/<Ward_Boundaries>/FeatureServer/0
       code_field: <wardcode>
       name_field: <wardname>
-    # If the ward layer carries parent codes, use them instead of a spatial join:
     parents: {admin1: <statecode>, admin2: <lgacode>}
 
 simplify: {admin3: 0.0005, admin2: 0.001, admin1: 0.002}
 
 population:
+  level: admin3
   source:
     type: arcgis
     url: https://services.arcgis.com/<org id>/arcgis/rest/services/<Population>/FeatureServer/0
@@ -72,26 +78,31 @@ population:
     column: <population_estimate>
 
 indicators:
-  # A ward-level layer keyed by ward code
+  # Ward-level small-area estimate, aggregated (population-weighted) to LGA and State
   - id: <poverty_rate_2023>
     label: Poverty rate (2023)
-    category: Poverty
-    direction: ascending
-    level: admin3
+    pillar: Poverty
+    higher_is_worse: true
     unit: "%"
     year: 2023
     source_note: <survey / model and date>
+    level: admin3
     source:
       type: arcgis
       url: https://services.arcgis.com/<org id>/arcgis/rest/services/<ward_indicators_2023>/FeatureServer/0
       key: <wardcode>
       column: <perc_pov_2023>
+    aggregate_to: [admin2, admin1]
+    aggregate: {fn: mean, weight: population}
+    # A survey that is representative at State level should be supplied there instead:
+    # sources:
+    #   admin1: {type: arcgis, url: <state survey layer>, key: <statecode>, column: <pov_rate>}
 
-  # A layer with no matching code, joined on names through the level's boundaries
+  # LGA-level layer with no matching code, joined on names; projected to wards in the app
   - id: <flood_impact_population>
     label: Expected annual flood impact — population
-    category: Climate Risk
-    direction: ascending
+    pillar: Climate Risk
+    higher_is_worse: true
     level: admin2
     source_note: <hazard model, ADM2>
     source:
@@ -100,12 +111,14 @@ indicators:
       name_key: <adm2_name>
       column: <EAI_population>
       where: "<hazard_class> = 0"
+    aggregate_to: [admin1]
+    aggregate: {fn: sum}
 
-  # Several rows per unit (e.g. events): aggregate them
+  # Several rows per unit (e.g. events): aggregate them per ward, then sum upward
   - id: <conflict_events>
     label: Conflict events
-    category: Conflict
-    direction: ascending
+    pillar: Conflict
+    higher_is_worse: true
     level: admin3
     fill: zero
     source:
@@ -114,6 +127,8 @@ indicators:
       key: <wardcode>
       column: <events>
       agg: sum
+    aggregate_to: [admin2, admin1]
+    aggregate: {fn: sum}
 
 overlays:
   - id: projects

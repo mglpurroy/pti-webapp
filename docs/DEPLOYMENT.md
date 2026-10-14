@@ -1,6 +1,6 @@
 # Running and deploying
 
-The app is a static site: `app/` holds HTML, CSS, JavaScript and data files, and there is no server code. All libraries (Plotly with MapLibre, simple-statistics) are bundled in `app/js/vendor/`, so it works where CDNs are blocked.
+The app is a static site: `app/` holds HTML, CSS, JavaScript and data files, and there is no server code. The one library (Plotly, which includes MapLibre) is bundled in `app/js/vendor/`, so it works where CDNs are blocked.
 
 ## Locally
 
@@ -76,6 +76,12 @@ app:
 ## Tests
 
 ```bash
-node --test tests/core.test.js   # method tests (pti-core.js), Node 18+
-python -m pytest tests/          # build smoke test (builds Demoland into a temp folder)
+npm test                    # method, devPTIpack parity and import tests (Node 18+; the import test needs Python)
+python -m pytest tests/     # build smoke tests
+```
+
+The parity fixtures in `tests/fixtures/` are produced by running devPTIpack itself. To regenerate them, clone https://github.com/worldbank/devPTIpack and run:
+
+```bash
+Rscript tests/fixtures/make_devptipack_fixtures.R <path to devPTIpack>
 ```

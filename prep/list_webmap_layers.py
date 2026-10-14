@@ -7,8 +7,9 @@ Usage:
     python prep/list_webmap_layers.py <webmap item id> [--portal URL] [--yaml out.yaml]
 
 Each numeric field of each feature layer becomes a commented draft indicator.
-Fill in label, category, direction and level, and set `key` to the field that
-holds the unit code (or `name_key` to join on unit names).
+Fill in label, pillar and level, set `key` to the field that holds the unit
+code (or `name_key` to join on unit names), and add `aggregate_to` for any
+coarser level the PTI should be shown at.
 """
 from __future__ import annotations
 
@@ -70,14 +71,16 @@ def main() -> None:
                 f"# from: {where}{lyr['title']}\n"
                 f"- id: {slug(f['alias'] or f['name'])}\n"
                 f"  label: \"{f['alias'] or f['name']}\"\n"
-                f"  category: TODO\n"
-                f"  direction: ascending      # or descending\n"
+                f"  pillar: TODO\n"
+                f"  higher_is_worse: true     # hint only; the weight's sign sets direction\n"
                 f"  level: TODO               # one of your level keys\n"
                 f"  source:\n"
                 f"    type: arcgis\n"
                 f"    url: {lyr['url']}\n"
                 f"    column: {f['name']}\n"
-                f"    key: TODO               # field holding the unit code (or name_key: …)\n")
+                f"    key: TODO               # field holding the unit code (or name_key: …)\n"
+                f"  # aggregate_to: [TODO]    # coarser levels to prepare from this one\n"
+                f"  # aggregate: {{fn: mean, weight: population}}\n")
 
     if a.yaml:
         with open(a.yaml, "w", encoding="utf-8") as fh:

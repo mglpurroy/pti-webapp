@@ -1,16 +1,25 @@
 """Build a PTI Builder dataset from a pti.yaml.
 
-Reads boundaries, indicator sources and overlays, joins everything onto the
-base unit, checks the result, and writes the files the web app loads:
+Reads boundaries, indicator sources and overlays, prepares every indicator at
+each spatial level it should be available at, checks the result, and writes
+the files the web app loads:
 
-    app/data/<id>/config.json              app settings + data dictionary
-    app/data/<id>/units.json               one row per base unit
+    app/data/<id>/config.json              app settings + indicator dictionary
+    app/data/<id>/data_<level>.json        one row per unit of each level
     app/data/<id>/boundaries_<level>.geojson
     app/data/<id>/overlay_<id>.geojson
     app/data/index.json                    list of datasets the app offers
 
-Indicator sources (per indicator, `source.type`):
-    table    CSV / Excel / any attribute table, keyed by a unit code
+The app follows the devPTIpack methodology: indicators are z-scored among the
+units of each level they are available at, and the app itself never
+aggregates data upward. Values at coarser levels are therefore prepared here,
+explicitly, per indicator — either supplied directly (`sources:`) or
+aggregated straight from the level they were measured at (`aggregate_to:`),
+with the function and weighting set per indicator, as devPTIpack does for
+hexagon data.
+
+Indicator sources (`source.type`):
+    table    CSV / Excel / any attribute table, keyed by a unit code or name
     raster   GeoTIFF summarised over each unit (zonal statistics)
     points   point features counted per unit (count, per km², per 1,000 people)
     arcgis   an ArcGIS Online / Enterprise feature layer (optional; see arcgis_rest.py)
@@ -41,10 +50,12 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 EQUAL_AREA = "EPSG:6933"  # for areas in km²
 APP_KEYS = {  # pti.yaml `app:` keys passed through to config.json
-    "title", "country", "subtitle", "default_level", "classes", "classification",
-    "min_coverage", "priority_labels", "legend", "map", "basemap", "categories",
-    "scenarios", "about", "arcgis_publish", "data_refresh_note",
+    "title", "country", "subtitle", "default_level", "bins", "missing", "cross_level",
+    "legend", "map", "basemap", "pillars", "scenarios", "about", "arcgis_publish",
+    "data_refresh_note",
 }
+AGG_FNS = {"mean", "sum", "min", "max", "median"}
+AGG_WEIGHTS = {"population", "area", "none", None}
 
 
 class BuildError(RuntimeError):
@@ -92,10 +103,11 @@ def read_table(spec: dict, base_dir: Path) -> pd.DataFrame:
     if not path.exists():
         raise BuildError(f"file not found: {path}")
     suf = path.suffix.lower()
+    key_types = {k: str for k in (spec.get("key"), spec.get("name_key")) if k}
     if suf in {".csv", ".txt"}:
-        return pd.read_csv(path, dtype={spec.get("key", ""): str})
+        return pd.read_csv(path, dtype=key_types)
     if suf in {".xlsx", ".xls"}:
-        return pd.read_excel(path, sheet_name=spec.get("sheet", 0), dtype={spec.get("key", ""): str})
+        return pd.read_excel(path, sheet_name=spec.get("sheet", 0), dtype=key_types)
     if suf == ".parquet":
         return pd.read_parquet(path)
     return pd.DataFrame(gpd.read_file(path, layer=spec.get("layer")).drop(columns="geometry", errors="ignore"))
@@ -124,64 +136,67 @@ def load_levels(cfg: dict, base_dir: Path) -> tuple[list[dict], dict[str, gpd.Ge
         if src_name and src_name in g.columns:
             keep[src_name] = lv["name"]
         # Parent codes already on the file (e.g. a ward file that carries lga codes)
-        for parent_key, field in (lv.get("parents") or {}).items() if isinstance(lv.get("parents"), dict) else []:
+        parents = lv.get("parents") if isinstance(lv.get("parents"), dict) else {}
+        for parent_key, field in parents.items():
             plv = next((x for x in levels if x["key"] == parent_key), None)
             if plv is None or field not in g.columns:
                 raise BuildError(f"level '{lv['key']}': parent '{parent_key}' field '{field}' not found")
             keep[field] = plv["code"]
         g = g[list(keep) + ["geometry"]].rename(columns=keep)
-        g[lv["code"]] = g[lv["code"]].astype(str).str.strip()
+        for c in keep.values():
+            if c != lv.get("name"):
+                g[c] = g[c].astype(str).str.strip()
         if lv["name"] not in g.columns:
             g[lv["name"]] = g[lv["code"]]
         if g[lv["code"]].duplicated().any():
             n = int(g[lv["code"]].duplicated().sum())
             log(f"  {lv['key']}: {n} duplicate code(s) — dissolving into multipart units")
             g = g.dissolve(by=lv["code"], as_index=False, aggfunc="first")
-        g = g[~g.geometry.is_empty & g.geometry.notna()]
+        g = g[~g.geometry.is_empty & g.geometry.notna()].reset_index(drop=True)
         g["geometry"] = g.geometry.make_valid()
         geos[lv["key"]] = g
         log(f"  {lv['label']:<12} {len(g):>7,} units  ({lv['key']})")
     return levels, geos
 
 
-def attach_parents(levels: list[dict], geos: dict[str, gpd.GeoDataFrame]) -> pd.DataFrame:
-    """Base-unit table carrying every parent level's code and name.
+def level_tables(levels: list[dict], geos: dict[str, gpd.GeoDataFrame]) -> dict[str, pd.DataFrame]:
+    """One table per level: its units with the code and name of every coarser level.
 
-    Parent codes come from the base file when it has them (`parents:` mapping);
-    otherwise each base unit is assigned to the parent polygon containing its
-    representative point.
+    Parent codes come from the boundary file when it has them (`parents:`);
+    otherwise each unit is assigned to the parent polygon containing its
+    representative point, or the nearest one if it falls outside them all.
+    Also adds area_km2.
     """
-    base = levels[-1]
-    g = geos[base["key"]].copy()
-    pts = gpd.GeoDataFrame(g[[base["code"]]], geometry=g.geometry.representative_point(), crs=g.crs)
-    for lv in levels[:-1]:
-        pg = geos[lv["key"]]
-        if lv["code"] not in g.columns:
-            j = gpd.sjoin(pts, pg[[lv["code"], "geometry"]], how="left", predicate="within")
-            j = j[~j.index.duplicated()]
-            g[lv["code"]] = j[lv["code"]].values
-            miss = int(g[lv["code"]].isna().sum())
-            if miss:
-                # Points on a shared edge or slightly outside: take the nearest parent
-                near = gpd.sjoin_nearest(pts[g[lv["code"]].isna().values].to_crs(EQUAL_AREA),
-                                         pg[[lv["code"], "geometry"]].to_crs(EQUAL_AREA), how="left")
-                near = near[~near.index.duplicated()]
-                g.loc[near.index, lv["code"]] = near[lv["code"]].values
-                log(f"  {base['label']} → {lv['label']}: {miss} unit(s) outside every "
-                    f"{lv['label'].lower()} polygon, assigned to the nearest")
-        else:
-            g[lv["code"]] = g[lv["code"]].astype(str).str.strip()
-        names = pg.set_index(lv["code"])[lv["name"]]
-        g[lv["name"]] = g[lv["code"]].map(names)
-        orphan = int(g[lv["name"]].isna().sum())
-        if orphan:
-            log(f"  WARNING: {orphan} {base['label'].lower()}(s) have a {lv['label']} code "
-                f"not found in the {lv['label'].lower()} boundaries")
-    cols = [c for lv in levels for c in (lv["code"], lv["name"])]
-    return pd.DataFrame(g[cols]).reset_index(drop=True)
+    tables: dict[str, pd.DataFrame] = {}
+    for k, lv in enumerate(levels):
+        g = geos[lv["key"]].copy()
+        pts = gpd.GeoDataFrame(g[[lv["code"]]], geometry=g.geometry.representative_point(), crs=g.crs)
+        for plv in levels[:k]:
+            pg = geos[plv["key"]]
+            if plv["code"] not in g.columns:
+                j = gpd.sjoin(pts, pg[[plv["code"], "geometry"]], how="left", predicate="within")
+                j = j[~j.index.duplicated()]
+                g[plv["code"]] = j[plv["code"]].values
+                miss = g[plv["code"]].isna().values
+                if miss.any():
+                    near = gpd.sjoin_nearest(pts[miss].to_crs(EQUAL_AREA),
+                                             pg[[plv["code"], "geometry"]].to_crs(EQUAL_AREA), how="left")
+                    near = near[~near.index.duplicated()]
+                    g.loc[near.index, plv["code"]] = near[plv["code"]].values
+                    log(f"  {lv['label']} → {plv['label']}: {int(miss.sum())} unit(s) outside every "
+                        f"{plv['label'].lower()} polygon, assigned to the nearest")
+            names = pg.set_index(plv["code"])[plv["name"]]
+            g[plv["name"]] = g[plv["code"]].map(names)
+            orphan = int(g[plv["name"]].isna().sum())
+            if orphan:
+                log(f"  WARNING: {orphan} {lv['label'].lower()} unit(s) have a {plv['label']} code "
+                    f"not found in the {plv['label'].lower()} boundaries")
+        cols = [c for p in levels[:k + 1] for c in (p["code"], p["name"])]
+        t = pd.DataFrame(g[cols]).reset_index(drop=True)
+        t["area_km2"] = g.to_crs(EQUAL_AREA).area.values / 1e6
+        tables[lv["key"]] = t
+    return tables
 
-
-# ── Indicator values ──────────────────────────────────────────
 
 def level_of(levels: list[dict], key: str) -> dict:
     lv = next((x for x in levels if x["key"] == key), None)
@@ -190,7 +205,9 @@ def level_of(levels: list[dict], key: str) -> dict:
     return lv
 
 
-def values_from_table(src: dict, lv: dict, geos, base_dir: Path, units: pd.DataFrame) -> pd.Series:
+# ── Indicator values ──────────────────────────────────────────
+
+def values_from_table(src: dict, lv: dict, geos, base_dir: Path) -> pd.Series:
     df = read_table(src, base_dir)
     col = src.get("column")
     if col not in df.columns:
@@ -205,9 +222,8 @@ def values_from_table(src: dict, lv: dict, geos, base_dir: Path, units: pd.DataF
                   .drop_duplicates("_n").set_index("_n")[lv["code"]])
         df["_code"] = df[nk].astype(str).str.strip().str.lower().map(lookup)
         n, m = int(df[nk].notna().sum()), int(df["_code"].notna().sum())
-        units_hit, units_all = df["_code"].nunique(), len(lookup)
         log(f"      name join on '{nk}': {m:,} of {n:,} source rows matched, "
-            f"covering {units_hit:,} of {units_all:,} {lv['label'].lower()} names")
+            f"covering {df['_code'].nunique():,} of {len(lookup):,} {lv['label'].lower()} names")
         key = "_code"
     else:
         key = src.get("key", lv["code"])
@@ -225,7 +241,7 @@ def values_from_table(src: dict, lv: dict, geos, base_dir: Path, units: pd.DataF
     return s
 
 
-def values_from_raster(src: dict, lv: dict, geos, base_dir: Path, units) -> pd.Series:
+def values_from_raster(src: dict, lv: dict, geos, base_dir: Path) -> pd.Series:
     try:
         from rasterstats import zonal_stats
         import rasterio
@@ -242,8 +258,7 @@ def values_from_raster(src: dict, lv: dict, geos, base_dir: Path, units) -> pd.S
     return pd.Series([z.get(stat) for z in zs], index=g[lv["code"]].values, dtype="float64")
 
 
-def values_from_points(src: dict, lv: dict, geos, base_dir: Path, units: pd.DataFrame,
-                       population: pd.Series | None) -> pd.Series:
+def values_from_points(src: dict, lv: dict, geos, base_dir: Path, tables, population) -> pd.Series:
     pts = read_vector(src, base_dir)
     if src.get("filter"):
         pts = pts.query(src["filter"])
@@ -253,42 +268,97 @@ def values_from_points(src: dict, lv: dict, geos, base_dir: Path, units: pd.Data
     stat = src.get("stat", "count")
     if stat == "count":
         return counts
+    t = tables[lv["key"]].set_index(lv["code"])
     if stat == "per_km2":
-        area = g.to_crs(EQUAL_AREA).area.values / 1e6
-        return counts / pd.Series(area, index=g[lv["code"]].values)
+        return counts / t["area_km2"].reindex(counts.index)
     if stat == "per_1000_pop":
         if population is None:
             raise BuildError("stat per_1000_pop needs a `population:` source")
-        pop = population.groupby(units[lv["code"]].values).sum() if lv is not None else population
-        return (counts / pop.reindex(counts.index) * 1000).replace([np.inf, -np.inf], np.nan)
+        pop = population[lv["key"]].reindex(counts.index)
+        return (counts / pop * 1000).replace([np.inf, -np.inf], np.nan)
     raise BuildError(f"unknown points stat '{stat}' (count | per_km2 | per_1000_pop)")
 
 
-def indicator_values(ind: dict, levels, geos, base_dir, units, population) -> pd.Series:
-    """Values at the indicator's native level, indexed by that level's code."""
-    lv = level_of(levels, ind.get("level", levels[-1]["key"]))
-    src = ind.get("source") or {}
+def values_at(src: dict, lv: dict, geos, base_dir: Path, tables, population) -> pd.Series:
     t = src.get("type", "table")
     if t in ("table", "arcgis"):
-        return values_from_table(src, lv, geos, base_dir, units)
+        return values_from_table(src, lv, geos, base_dir)
     if t == "raster":
-        return values_from_raster(src, lv, geos, base_dir, units)
+        return values_from_raster(src, lv, geos, base_dir)
     if t == "points":
-        return values_from_points(src, lv, geos, base_dir, units, population)
+        return values_from_points(src, lv, geos, base_dir, tables, population)
     raise BuildError(f"unknown source type '{t}'")
+
+
+def aggregate(values: pd.Series, src_lv: dict, dst_lv: dict, tables, population,
+              fn: str = "mean", weight: str | None = None) -> pd.Series:
+    """Aggregate values of one level directly to a coarser level.
+
+    Always straight from the measured level to each target (never chained
+    through intermediate levels), with the function and weighting chosen per
+    indicator — the rule devPTIpack applies to hexagon data.
+    """
+    t = tables[src_lv["key"]][[src_lv["code"], dst_lv["code"], "area_km2"]].copy()
+    t["v"] = t[src_lv["code"]].map(values)
+    if weight == "population":
+        if population is None:
+            raise BuildError("aggregate weight 'population' needs a `population:` source")
+        t["w"] = t[src_lv["code"]].map(population[src_lv["key"]])
+    elif weight == "area":
+        t["w"] = t["area_km2"]
+    else:
+        t["w"] = 1.0
+    t = t.dropna(subset=["v", dst_lv["code"]])
+    g = t.groupby(dst_lv["code"])
+    if fn == "mean":
+        if weight in ("population", "area"):
+            t = t[t["w"] > 0]
+            return t.groupby(dst_lv["code"]).apply(lambda d: np.average(d["v"], weights=d["w"]), include_groups=False)
+        return g["v"].mean()
+    return g["v"].agg(fn)
+
+
+def fill_value(values: pd.Series, rule):
+    if rule is None:
+        return None
+    if isinstance(rule, (int, float)) and not isinstance(rule, bool):
+        return float(rule)
+    v = values.dropna()
+    return {"zero": 0.0, "min": v.min(), "max": v.max(), "mean": v.mean(), "median": v.median()}.get(rule)
+
+
+def describe_source(src: dict) -> str:
+    t = src.get("type", "table")
+    if t == "raster":
+        return f"raster {src.get('stat', 'mean')} of {Path(src['file']).name}"
+    if t == "points":
+        return f"points ({src.get('stat', 'count')}) from {Path(src['file']).name}"
+    if t == "arcgis":
+        return f"ArcGIS layer {src.get('url', '')}"
+    return f"table {Path(src.get('file', '')).name}"
 
 
 # ── Output helpers ────────────────────────────────────────────
 
-def sig(v, digits: int = 5):
-    """Round to significant digits; keeps small densities and large counts precise."""
+def sig(v, digits: int = 10):
+    """Round to significant digits (area, population)."""
     if v is None or (isinstance(v, float) and not math.isfinite(v)):
         return None
     if isinstance(v, (int, np.integer)):
         return int(v)
-    if v == 0:
-        return 0
-    return float(f"{float(v):.{digits}g}")
+    if isinstance(v, (float, np.floating)):
+        if v == 0:
+            return 0
+        return float(f"{float(v):.{digits}g}")
+    return v
+
+
+def full(v):
+    """A float as JSON-safe Python float (shortest exact repr), or None."""
+    if v is None:
+        return None
+    v = float(v)
+    return v if math.isfinite(v) else None
 
 
 def round_coords(obj, nd: int = 5):
@@ -311,10 +381,67 @@ def write_geojson(gdf: gpd.GeoDataFrame, path: Path, props: list[str], tolerance
         feats.append({"type": "Feature",
                       "properties": {k: (None if (isinstance(v, float) and not math.isfinite(v)) else v)
                                      for k, v in rec.items()},
-                      "geometry": {"type": gj["type"], "coordinates": round_coords(json.loads(json.dumps(gj["coordinates"])))}})
+                      "geometry": {"type": gj["type"],
+                                   "coordinates": round_coords(json.loads(json.dumps(gj["coordinates"])))}})
     path.write_text(json.dumps({"type": "FeatureCollection", "features": feats}, separators=(",", ":")),
                     encoding="utf-8")
     return path.stat().st_size
+
+
+def write_dataset(out: Path, ds_id: str, app: dict, levels: list[dict], geos, tables,
+                  values: dict[str, dict[str, pd.Series]], indicators_meta: list[dict],
+                  population: dict[str, pd.Series] | None, overlays: list[tuple[dict, gpd.GeoDataFrame]],
+                  simplify: dict | None = None) -> None:
+    """Write everything the app reads. Shared by build_dataset and import_devptipack."""
+    out.mkdir(parents=True, exist_ok=True)
+    log(f"\nWriting {out}")
+    simplify = simplify or {}
+    for lv in levels:
+        size = write_geojson(geos[lv["key"]], out / f"boundaries_{lv['key']}.geojson",
+                             [lv["code"], lv["name"]], simplify.get(lv["key"]))
+        log(f"  boundaries_{lv['key']}.geojson  {size / 1e6:.1f} MB")
+    for meta, g in overlays:
+        size = write_geojson(g, out / meta["file"], meta["fields"], simplify.get(meta["id"]))
+        log(f"  {meta['file']}  {size / 1e6:.2f} MB")
+
+    for lv in levels:
+        t = tables[lv["key"]].copy()
+        code = t[lv["code"]]
+        if population is not None:
+            t["population"] = code.map(population[lv["key"]]).values
+        ind_cols = []
+        for iid, by_level in values.items():
+            if lv["key"] in by_level:
+                t[iid] = code.map(by_level[lv["key"]]).astype(float).values
+                ind_cols.append(iid)
+        # Indicator values are written at full precision: z-scores depend on
+        # the spread, which rounding can erase when values share a large offset
+        exact = set(ind_cols)
+        rows = [{k: (full(v) if k in exact else sig(v) if k in {"area_km2", "population"} else v)
+                 for k, v in rec.items()} for rec in t.to_dict("records")]
+        p = out / f"data_{lv['key']}.json"
+        p.write_text(json.dumps(rows, separators=(",", ":"), allow_nan=False), encoding="utf-8")
+        log(f"  data_{lv['key']}.json  {len(rows):,} rows × {len(ind_cols)} indicators  {p.stat().st_size / 1e6:.1f} MB")
+
+    config = {
+        "id": ds_id,
+        **app,
+        "method": "devPTIpack",
+        "levels": [{k: lv[k] for k in ("key", "label", "code", "name") if k in lv} for lv in levels],
+        "population": population is not None,
+        "indicators": indicators_meta,
+        "overlays": [m for m, _ in overlays],
+        "built": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    (out / "config.json").write_text(json.dumps(config, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    log("  config.json")
+
+    index_path = out.parent / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {"datasets": []}
+    entry = {"id": ds_id, "path": out.name, "label": app.get("country") or ds_id}
+    index["datasets"] = [d for d in index["datasets"] if d["id"] != ds_id] + [entry]
+    index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
+    log(f"  index.json  ({len(index['datasets'])} dataset(s))")
 
 
 # ── Validation ────────────────────────────────────────────────
@@ -324,28 +451,50 @@ def validate_config(cfg: dict, levels: list[dict], indicators: list[dict]) -> li
     every one is reported in a single run."""
     errs: list[str] = []
     ids = [i["id"] for i in indicators]
-    level_keys = {lv["key"] for lv in levels}
+    keys = [lv["key"] for lv in levels]
+    rank = {k: r for r, k in enumerate(keys)}
     for i in indicators:
-        if i.get("direction") not in {"ascending", "descending"}:
-            errs.append(f"indicator '{i['id']}': direction must be ascending or descending")
-        if i.get("level", levels[-1]["key"]) not in level_keys:
-            errs.append(f"indicator '{i['id']}': unknown level '{i.get('level')}'")
-        sc = i.get("scoring")
-        if sc and sc.get("type") not in {"breaks", "categories"}:
-            errs.append(f"indicator '{i['id']}': scoring.type must be breaks or categories")
+        iid = i.get("id", "?")
+        lvl = i.get("level", keys[-1])
+        if lvl not in rank:
+            errs.append(f"indicator '{iid}': unknown level '{lvl}'")
+            continue
+        for t in i.get("aggregate_to") or []:
+            if t not in rank:
+                errs.append(f"indicator '{iid}': aggregate_to unknown level '{t}'")
+            elif rank[t] >= rank[lvl]:
+                errs.append(f"indicator '{iid}': aggregate_to '{t}' is not coarser than '{lvl}'")
+        agg = i.get("aggregate") or {}
+        if agg.get("fn", "mean") not in AGG_FNS:
+            errs.append(f"indicator '{iid}': aggregate.fn must be one of {sorted(AGG_FNS)}")
+        if agg.get("weight") not in AGG_WEIGHTS:
+            errs.append(f"indicator '{iid}': aggregate.weight must be population, area or none")
+        for k in (i.get("sources") or {}):
+            if k not in rank:
+                errs.append(f"indicator '{iid}': sources has unknown level '{k}'")
+        if "scoring" in i or "direction" in i:
+            errs.append(f"indicator '{iid}': 'scoring'/'direction' are not part of the devPTIpack method — "
+                        f"set the sign of the weight in each scenario instead (higher_is_worse is an optional hint)")
     if len(set(ids)) != len(ids):
         errs.append("duplicate indicator ids")
     app = cfg.get("app", {})
+    pti_ids = {i["id"] for i in indicators if i.get("pti", True)}
     for sc in app.get("scenarios", []):
         w = sc.get("weights") or {}
-        unknown = [k for k in w if k not in ids]
+        unknown = [k for k in w if k not in pti_ids]
         if unknown:
-            errs.append(f"scenario '{sc.get('id')}': unknown indicators {unknown}")
-        if w and round(sum(w.values()), 6) != 100:
-            errs.append(f"scenario '{sc.get('id')}': weights sum to {sum(w.values())}, not 100")
-    dl = app.get("default_level")
-    if dl and dl not in level_keys:
-        errs.append(f"default_level '{dl}' is not a level key")
+            errs.append(f"scenario '{sc.get('id')}': unknown or explorer-only indicators {unknown}")
+        bad = [k for k, v in w.items() if not isinstance(v, (int, float)) or isinstance(v, bool)]
+        if bad:
+            errs.append(f"scenario '{sc.get('id')}': non-numeric weights for {bad}")
+        elif w and not any(w.values()):
+            errs.append(f"scenario '{sc.get('id')}': every weight is 0")
+    if app.get("default_level") and app["default_level"] not in rank:
+        errs.append(f"default_level '{app['default_level']}' is not a level key")
+    if app.get("missing", "no_priority") not in {"no_priority", "ignore"}:
+        errs.append("app.missing must be no_priority or ignore")
+    if app.get("cross_level", "project") not in {"project", "devptipack_code"}:
+        errs.append("app.cross_level must be project or devptipack_code")
     return errs
 
 
@@ -364,59 +513,91 @@ def build(yaml_path: Path, check_only: bool = False) -> None:
     errs = validate_config(cfg, levels, indicators)
     if errs:
         raise BuildError("config problems:\n  - " + "\n  - ".join(errs))
-
-    units = attach_parents(levels, geos)
+    tables = level_tables(levels, geos)
     base = levels[-1]
 
     population = None
-    pop_cfg = cfg.get("population")
-    if pop_cfg:
+    if cfg.get("population"):
         log("\nPopulation")
-        pop_ind = {"id": "population", "level": base["key"], **pop_cfg}
-        s = indicator_values(pop_ind, levels, geos, base_dir, units, None)
-        population = units[base["code"]].map(s).astype(float)
-        population.index = units[base["code"]].values
-        units["population"] = population.values
-        log(f"  total {np.nansum(units['population']):,.0f}; "
-            f"{int(units['population'].isna().sum())} unit(s) without population")
+        pc = cfg["population"]
+        plv = level_of(levels, pc.get("level", base["key"]))
+        s = values_at(pc["source"], plv, geos, base_dir, tables, None)
+        population = {plv["key"]: s}
+        for lv in levels:   # population counts sum directly to every coarser level
+            if lv["key"] != plv["key"] and levels.index(lv) < levels.index(plv):
+                population[lv["key"]] = aggregate(s, plv, lv, tables, None, "sum")
+        log(f"  total {np.nansum(s.values):,.0f} at {plv['key']} level")
 
     log("\nIndicators")
+    values: dict[str, dict[str, pd.Series]] = {}
     meta_out: list[dict] = []
     report: list[tuple] = []
     for ind in indicators:
-        lv = level_of(levels, ind.get("level", base["key"]))
-        log(f"  {ind['id']}  [{lv['key']}, {ind.get('source', {}).get('type', 'table')}]")
+        iid = ind["id"]
+        lvl = level_of(levels, ind.get("level", base["key"]))
+        prov: dict[str, str] = {}
+        by_level: dict[str, pd.Series] = {}
+        filled: dict[str, int] = {}
+
+        def finalize(k: str, s: pd.Series) -> pd.Series:
+            """Check the join, align to the level's units and apply the fill rule."""
+            lv = level_of(levels, k)
+            codes = set(geos[k][lv["code"]].astype(str))
+            s.index = s.index.astype(str)
+            s = s.groupby(level=0).first()
+            if not set(s.dropna().index) & codes:
+                raise BuildError(f"no values matched any {lv['label']} code. "
+                                 f"Source sample {list(s.index[:3])}, boundary sample {sorted(codes)[:3]}")
+            s = s.reindex(sorted(codes))
+            fv = fill_value(s, ind.get("fill"))
+            if fv is not None and s.isna().any():
+                filled[k] = int(s.isna().sum())
+                s = s.fillna(fv)
+            report.append((iid, k, float(s.notna().mean()), filled.get(k), len(codes)))
+            return s
+
         try:
-            s = indicator_values(ind, levels, geos, base_dir, units, population)
+            if ind.get("source"):
+                log(f"  {iid}  [{lvl['key']}, {ind['source'].get('type', 'table')}]")
+                # Filled before aggregating, so coarser levels summarise the
+                # same values the measured level shows
+                by_level[lvl["key"]] = finalize(lvl["key"], values_at(ind["source"], lvl, geos, base_dir, tables, population))
+                prov[lvl["key"]] = describe_source(ind["source"])
+            agg = ind.get("aggregate") or {}
+            for t in ind.get("aggregate_to") or []:
+                tl = level_of(levels, t)
+                fn, w = agg.get("fn", "mean"), agg.get("weight")
+                by_level[t] = finalize(t, aggregate(by_level[lvl["key"]], lvl, tl, tables, population, fn, w))
+                prov[t] = f"{'population-weighted ' if w == 'population' else 'area-weighted ' if w == 'area' else ''}"                           f"{fn} of {lvl['label'].lower()} values"
+                log(f"      → {t}: {prov[t]}")
+            for k, src in (ind.get("sources") or {}).items():
+                sl = level_of(levels, k)
+                log(f"      + {k}: {src.get('type', 'table')}")
+                by_level[k] = finalize(k, values_at(src, sl, geos, base_dir, tables, population))
+                prov[k] = describe_source(src)
         except Exception as e:
             if type(e).__name__ == "TokenExpired":
                 raise
-            raise BuildError(f"indicator '{ind['id']}': {e}") from e
-        native_codes = set(geos[lv["key"]][lv["code"]])
-        matched = len(set(s.dropna().index.astype(str)) & native_codes)
-        if matched == 0:
-            raise BuildError(f"indicator '{ind['id']}': no values matched any {lv['label']} code. "
-                             f"Source sample {list(s.index[:3])}, boundary sample {sorted(native_codes)[:3]}")
-        units[ind["id"]] = units[lv["code"]].map(s.groupby(level=0).first()).astype(float)
-        cov = float(units[ind["id"]].notna().mean())
-        native_cov = matched / max(len(native_codes), 1)
-        report.append((ind["id"], lv["key"], native_cov, cov, ind.get("fill")))
-        meta = {k: v for k, v in ind.items() if k != "source"}
-        meta["level"] = lv["key"]
-        src = ind.get("source") or {}
-        meta.setdefault("source_type", src.get("type", "table"))
+            raise BuildError(f"indicator '{iid}': {e}") from e
+        if not by_level:
+            raise BuildError(f"indicator '{iid}': no `source` or `sources`")
+        values[iid] = by_level
+
+        meta = {k: v for k, v in ind.items() if k not in {"source", "sources", "aggregate", "aggregate_to", "level"}}
+        meta["levels"] = [lv["key"] for lv in levels if lv["key"] in by_level]
+        meta["provenance"] = prov
+        if filled:
+            meta["filled"] = filled
         meta_out.append(meta)
 
-    log("\nCoverage (share of units with a value — gaps are filled in the app only "
-        "where the indicator has a `fill` rule)")
-    for iid, lvk, ncov, cov, fill in report:
-        flag = "" if cov >= 0.999 else ("  ← gaps, fill: " + str(fill) if fill is not None
-                                        else "  ← gaps and no fill rule")
-        log(f"  {iid:<34} {lvk:<10} {ncov:6.1%} of {lvk} units, {cov:6.1%} of {base['label'].lower()} units{flag}")
+    log("\nCoverage at each level an indicator is prepared for (devPTIpack gives units with missing\n"
+        "values no priority — fill gaps here, or set app.missing: ignore)")
+    for iid, k, cov, nfill, n in report:
+        flag = f"  ({nfill} filled with {next(i.get('fill') for i in indicators if i['id'] == iid)})" if nfill else \
+            ("" if cov >= 0.999 else "  ← gaps")
+        log(f"  {iid:<30} {k:<10} {cov:6.1%} of {n:,}{flag}")
 
-    # Overlays
-    overlays_meta: list[dict] = []
-    overlay_geo: dict[str, gpd.GeoDataFrame] = {}
+    overlays = []
     for ov in cfg.get("overlays") or []:
         g = read_vector(ov, base_dir)
         fields = [f for f in (ov.get("fields") or []) if f in g.columns]
@@ -428,70 +609,31 @@ def build(yaml_path: Path, check_only: bool = False) -> None:
         gt = {"linestring": "line"}.get(gt, gt)
         if ov.get("role") == "portfolio":
             # Tag each project with the base unit it falls in, so the app can
-            # count projects per unit without a point-in-polygon pass
+            # count projects per unit at any level without a spatial join
             gb = geos[base["key"]][[base["code"], "geometry"]]
             pts = g.copy()
             pts["geometry"] = g.geometry.representative_point()
             j = gpd.sjoin(pts, gb, how="left", predicate="within")
             j = j[~j.index.duplicated()]
             g["_unit"] = j[base["code"]].values
-            n_out = int(g["_unit"].isna().sum())
-            log(f"  overlay {ov['id']}: {len(g)} feature(s), {n_out} outside the study area")
+            log(f"  overlay {ov['id']}: {len(g)} feature(s), {int(g['_unit'].isna().sum())} outside the study area")
             fields.append("_unit")
         else:
             log(f"  overlay {ov['id']}: {len(g)} feature(s)")
-        overlay_geo[ov["id"]] = g
         m = {k: v for k, v in ov.items() if k not in {"file", "arcgis", "url", "layer", "where", "fields"}}
         m.update({"geometry": gt, "file": f"overlay_{ov['id']}.geojson", "fields": fields})
-        overlays_meta.append(m)
+        overlays.append((m, g))
 
     if check_only:
         log("\nCheck passed — nothing written (--check).")
         return
 
-    # ── Write ──
-    out.mkdir(parents=True, exist_ok=True)
-    log(f"\nWriting {out}")
-    simplify = cfg.get("simplify") or {}
-    for lv in levels:
-        size = write_geojson(geos[lv["key"]], out / f"boundaries_{lv['key']}.geojson",
-                             [lv["code"], lv["name"]], simplify.get(lv["key"]))
-        log(f"  boundaries_{lv['key']}.geojson  {size / 1e6:.1f} MB")
-    for ov in overlays_meta:
-        g = overlay_geo[ov["id"]]
-        size = write_geojson(g, out / ov["file"], ov["fields"], (cfg.get("simplify") or {}).get(ov["id"]))
-        log(f"  {ov['file']}  {size / 1e6:.2f} MB")
-
-    rows = []
-    value_cols = [c for c in units.columns if c not in {x for lv in levels for x in (lv["code"], lv["name"])}]
-    for rec in units.to_dict("records"):
-        rows.append({k: (sig(v) if k in value_cols else v) for k, v in rec.items()})
-    (out / "units.json").write_text(json.dumps(rows, separators=(",", ":"), allow_nan=False), encoding="utf-8")
-    log(f"  units.json  {len(rows):,} rows  {(out / 'units.json').stat().st_size / 1e6:.1f} MB")
-
     app = {k: v for k, v in (cfg.get("app") or {}).items() if k in APP_KEYS}
-    unknown_app = set((cfg.get("app") or {})) - APP_KEYS
+    unknown_app = set(cfg.get("app") or {}) - APP_KEYS
     if unknown_app:
         log(f"  NOTE: ignoring unknown app keys {sorted(unknown_app)}")
-    config = {
-        "id": ds_id,
-        **app,
-        "levels": [{k: lv[k] for k in ("key", "label", "code", "name") if k in lv} for lv in levels],
-        "population_field": "population" if pop_cfg else None,
-        "indicators": meta_out,
-        "overlays": overlays_meta,
-        "built": dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
-    }
-    (out / "config.json").write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-    log("  config.json")
-
-    # Register in the app's dataset index
-    index_path = out.parent / "index.json"
-    index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {"datasets": []}
-    entry = {"id": ds_id, "path": out.name, "label": app.get("country") or ds_id}
-    index["datasets"] = [d for d in index["datasets"] if d["id"] != ds_id] + [entry]
-    index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
-    log(f"  index.json  ({len(index['datasets'])} dataset(s))")
+    write_dataset(out, ds_id, app, levels, geos, tables, values, meta_out, population, overlays,
+                  cfg.get("simplify"))
     log("\nDone.")
 
 

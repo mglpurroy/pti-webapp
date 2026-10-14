@@ -4,7 +4,7 @@
   "private": true,
   "description": "Project Targeting Index builder - static web app",
   "scripts": {
-    "test": "node --test tests/core.test.js",
+    "test": "node --test tests/core.test.js tests/import.test.js",
     "serve": "python -m http.server 8000 --directory app"
   }
 }

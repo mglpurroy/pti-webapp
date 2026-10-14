@@ -1,6 +1,7 @@
 /* ── PTI Builder — map-centric app ──────────────────────────
- * Everything country-specific comes from data/<dataset>/config.json, written
- * by prep/build_dataset.py. The method itself lives in pti-core.js.
+ * Everything country-specific comes from data/<dataset>/config.json and
+ * data_<level>.json, written by prep/build_dataset.py or
+ * prep/import_devptipack.py. The method lives in pti-core.js.
  */
 'use strict';
 
@@ -9,17 +10,19 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const isNum = v => typeof v === 'number' && Number.isFinite(v);
 
 const S = {
-  index: null, dsPath: '', cfg: null, units: [], ind: new Map(), levels: [], base: null,
-  levelByKey: {}, geo: {}, overlayGeo: {}, overlayOn: new Set(),
-  level: null, method: 'quantile', nClasses: 5, weightField: null,
-  run: null, rows: [], robust: null, mapVar: 'pti', compare: null, savedRuns: [],
-  mapRendered: false, aoiMode: false, drawerOpen: false, sortCol: 'score', sortAsc: false,
-  portfolio: null,
+  index: null, dsPath: '', cfg: null, levels: [], levelByKey: {}, model: null, ind: new Map(),
+  geo: {}, overlayGeo: {}, overlayOn: new Set(),
+  level: null, bins: 5, run: null, res: null, groups: null, rows: [], robust: null,
+  mapVar: 'priority', explorerId: null, savedRuns: [], mapRendered: false, aoiMode: false,
+  drawerOpen: false, sortCol: 'score', sortAsc: false, portfolio: null,
 };
 
-const SCORE_SCALE = [[0, '#1a9641'], [.25, '#a6d96a'], [.5, '#ffffbf'], [.75, '#fdae61'], [1, '#d7191c']];
+// RdYlBu, red = Priority 1 (devPTIpack's default palette, reversed so red is highest priority)
+const RDYLBU = ['#a50026', '#d73027', '#f46d43', '#fdae61', '#fee090', '#e0f3f8', '#abd9e9', '#74add1', '#4575b4', '#313695'];
+const NO_DATA = '#c8ccd2';
 const ROBUST_SCALE = [[0, '#f1f5f9'], [.5, '#93c5fd'], [.8, '#2563eb'], [1, '#1e3a8a']];
-const BADGE_CSS = ['need-very-low', 'need-low', 'need-moderate', 'need-high', 'need-very-high'];
+const SEQ_SCALE = [[0, '#fff7ec'], [.25, '#fdd49e'], [.5, '#fc8d59'], [.75, '#d7301f'], [1, '#7f0000']];
+const DIV_SCALE = [[0, '#313695'], [.25, '#74add1'], [.5, '#ffffbf'], [.75, '#f46d43'], [1, '#a50026']];
 const DEFAULT_BASEMAP = {
   tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}'],
   labels: ['https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}'],
@@ -45,14 +48,17 @@ async function init() {
     }
     S.dsPath = `data/${pick.path || pick.id}`;
     S.cfg = await fetchJSON(`${S.dsPath}/config.json`);
-    S.units = await fetchJSON(`${S.dsPath}/units.json`);
+    if (S.cfg.method !== 'devPTIpack') throw new Error('this dataset was built for an older version of the app — rebuild it with prep/build_dataset.py');
+    const data = {};
+    await Promise.all(S.cfg.levels.map(async l => { data[l.key] = await fetchJSON(`${S.dsPath}/data_${l.key}.json`); }));
+    S.model = PTICore.buildModel(S.cfg.levels, data);
     setupDataset();
   } catch (err) {
     console.error(err);
     $('data-status').className = 'status-chip error';
     $('data-status').textContent = 'Data missing';
     $('indicator-panels').innerHTML = `<div class="ind-loading err">Could not load the dataset.<br><code>${esc(err.message)}</code><br>
-      Build one with <code>python prep/build_dataset.py &lt;pti.yaml&gt;</code>, and serve the <code>app/</code> folder over HTTP.</div>`;
+      Build one with <code>python prep/build_dataset.py &lt;pti.yaml&gt;</code> and serve the <code>app/</code> folder over HTTP.</div>`;
   }
 }
 
@@ -67,43 +73,26 @@ function setupDataset() {
   document.title = `${c.country ? c.country + ' — ' : ''}${c.title || 'Project Targeting Index'}`;
   $('app-title').textContent = c.title || 'Project Targeting Index';
   $('app-subtitle').textContent = [c.country, c.subtitle].filter(Boolean).join(' · ');
-
-  S.levels = c.levels.map((l, i) => ({ ...l, rank: i }));
-  S.base = S.levels[S.levels.length - 1];
-  S.levelByKey = Object.fromEntries(S.levels.map(l => [l.key, l]));
+  S.levels = S.model.levels;
+  S.levelByKey = S.model.byKey;
   S.level = S.levelByKey[c.default_level] ? c.default_level : S.levels[Math.max(0, S.levels.length - 2)].key;
-  S.method = ['quantile', 'equal', 'natural'].includes(c.classification) ? c.classification : 'quantile';
-  S.nClasses = Math.max(3, Math.min(9, c.classes || 5));
-  S.weightField = c.population_field || null;
+  S.bins = Math.max(2, Math.min(10, c.bins || 5));
+  $('bins-select').value = String(S.bins);
   c.indicators.forEach(m => S.ind.set(m.id, m));
   try { S.savedRuns = JSON.parse(localStorage.getItem(runsKey()) || '[]'); } catch (_) { S.savedRuns = []; }
 
-  // Level toggle, coarse → fine as configured
   $('admin-toggle').innerHTML = S.levels.map(l =>
     `<button class="tg${l.key === S.level ? ' active' : ''}" data-level="${esc(l.key)}">${esc(l.label)}</button>`).join('');
   $('admin-toggle').querySelectorAll('.tg').forEach(b => b.addEventListener('click', () => {
     setActive('#admin-toggle', b); S.level = b.dataset.level; S.robust = null; resetMapVar();
-    hideUnitPanel(); if (S.run) renderAll();
+    hideUnitPanel(); if (S.run) renderAll(); else if (S.mapVar === 'indicator') renderMap();
   }));
-  setActive('#reclass-toggle', document.querySelector(`#reclass-toggle [data-reclass="${S.method}"]`));
-  $('nclass-select').value = String(S.nClasses);
-  if (![...$('nclass-select').options].some(o => o.value === String(S.nClasses))) {
-    $('nclass-select').insertAdjacentHTML('beforeend', `<option value="${S.nClasses}">${S.nClasses}</option>`);
-    $('nclass-select').value = String(S.nClasses);
-  }
-  if (!S.weightField) {
-    setActive('#weight-toggle', document.querySelector('#weight-toggle [data-weight="equal"]'));
-    const pb = document.querySelector('#weight-toggle [data-weight="pop"]');
-    pb.disabled = true; pb.title = 'No population in this dataset — aggregation is unweighted';
-  }
-
-  const leg = c.legend || {};
-  $('legend-low').textContent = leg.low || 'Lower priority';
-  $('legend-high').textContent = leg.high || 'Higher priority';
 
   buildScenarioSelect();
   buildIndicatorPanels();
+  buildExplorerSelect();
   buildLayersPanel();
+  updateCompareSelect();
   if (c.arcgis_publish) $('agol-publish-btn').style.display = '';
   if (c.data_refresh_note) {
     $('refresh-section').style.display = '';
@@ -111,42 +100,41 @@ function setupDataset() {
     if (c.data_refresh_note.command) $('refresh-cmd').textContent = c.data_refresh_note.command;
     else $('refresh-cmd').style.display = 'none';
   }
-
-  // The status chip is only needed when loading fails; on success the counts
-  // move to the subtitle tooltip to keep the top bar free for the controls
+  if (portfolioLayer()) $('portfolio-tab').style.display = '';
   $('data-status').style.display = 'none';
-  $('app-subtitle').title = `${S.units.length.toLocaleString()} ${plural(S.base.label, S.units.length)} · ${c.indicators.length} indicators · built ${c.built || '?'}`;
+  const base = S.levels[S.levels.length - 1];
+  $('app-subtitle').title = `${base.rows.length.toLocaleString()} ${base.label.toLowerCase()} units · ${c.indicators.length} indicators · built ${c.built || '?'}`;
   $('calc-btn').disabled = false;
+
   const first = (c.scenarios || [])[0];
   if (first) { $('scenario-select').value = first.id; applyScenario(first.id); }
-  updateSavedRunsUI();
-  if (S.portfolioLayer()) $('portfolio-tab').style.display = '';
 
-  // Boundaries load in the background; the base level can be large
   for (const l of S.levels) {
     fetchJSON(`${S.dsPath}/boundaries_${l.key}.geojson`).then(gj => {
       S.geo[l.key] = gj;
-      if (!S.mapRendered && l.rank === 0) drawEmptyMap();
-      if (S.run && l.key === S.level) renderMap();
+      if (!S.mapRendered && l.rank === 0) drawBaseMap();
+      if (l.key === S.level && (S.run || S.mapVar === 'indicator')) renderMap();
     }).catch(() => console.warn(`no boundaries for ${l.key}`));
   }
 }
 
-S.portfolioLayer = () => (S.cfg?.overlays || []).find(o => o.role === 'portfolio');
 const runsKey = () => `pti_runs_${S.cfg.id}`;
-const plural = (w, n) => (n === 1 ? w.toLowerCase() : w.toLowerCase().replace(/y$/, 'ie') + 's');
-const levelOf = id => S.levelByKey[S.ind.get(id)?.level] || S.base;
+const portfolioLayer = () => (S.cfg?.overlays || []).find(o => o.role === 'portfolio');
+const opts = () => ({ crossLevel: S.cfg.cross_level || 'project', naRm: S.cfg.missing === 'ignore' });
+const levelLabel = k => S.levelByKey[k]?.label || k;
 function setActive(sel, btn) {
   document.querySelectorAll(`${sel} .tg`).forEach(x => x.classList.remove('active'));
   btn?.classList.add('active');
 }
 
-/* ── Static wiring (independent of the dataset) ─────────── */
+/* ── Static wiring ───────────────────────────────────────── */
 function wireStatic() {
   $('scenario-select').addEventListener('change', e => applyScenario(e.target.value));
   $('calc-btn').addEventListener('click', runPTI);
   $('results-toggle').addEventListener('click', toggleDrawer);
-  $('equalize-btn').addEventListener('click', equalizeWeights);
+  $('unit-weights-btn').addEventListener('click', unitWeights);
+  $('clear-weights-btn').addEventListener('click', () => { for (const id of S.ind.keys()) setRow(id, 0); markCustom(); updateWeightSummary(); });
+  $('bins-select').addEventListener('change', e => { S.bins = +e.target.value; if (S.run) renderAll(); });
   $('aoi-btn').addEventListener('click', toggleAOI);
   $('aoi-clear-btn').addEventListener('click', clearAOI);
   $('aoi-close').addEventListener('click', clearAOI);
@@ -155,32 +143,23 @@ function wireStatic() {
   $('layers-close').addEventListener('click', () => { $('layers-panel').style.display = 'none'; });
   $('about-btn').addEventListener('click', showAbout);
   $('table-search').addEventListener('input', () => buildTable(filterRows()));
-  $('compare-select').addEventListener('change', onCompareSelect);
-  $('compare-clear').addEventListener('click', () => { $('compare-select').value = ''; onCompareSelect(); });
+  $('compare-select').addEventListener('change', onCompare);
   $('save-run-btn').addEventListener('click', saveRun);
   $('rob-run').addEventListener('click', runRobustness);
   $('agol-publish-btn').addEventListener('click', showAgolModal);
   $('agol-go-btn').addEventListener('click', runAgolPublish);
   $('dl-csv').addEventListener('click', downloadLevelCSV);
-  $('dl-csv-base').addEventListener('click', downloadBaseCSV);
+  $('dl-csv-z').addEventListener('click', downloadIndicatorsCSV);
   $('dl-geojson').addEventListener('click', downloadGeoJSON);
   $('dl-meta').addEventListener('click', downloadRunNotes);
+  $('explorer-select').addEventListener('change', e => {
+    S.explorerId = e.target.value;
+    document.querySelector('input[name=mapvar][value=indicator]').checked = true;
+    S.mapVar = 'indicator'; renderMap();
+  });
   document.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => { $(b.dataset.close).style.display = 'none'; }));
   document.querySelectorAll('.modal-bg').forEach(bg => bg.addEventListener('click', e => { if (e.target === bg) bg.style.display = 'none'; }));
-  document.querySelectorAll('#reclass-toggle .tg').forEach(b => b.addEventListener('click', () => {
-    setActive('#reclass-toggle', b); S.method = b.dataset.reclass;
-  }));
-  $('nclass-select').addEventListener('change', e => { S.nClasses = +e.target.value; });
-  document.querySelectorAll('#weight-toggle .tg').forEach(b => b.addEventListener('click', () => {
-    if (b.disabled) return;
-    setActive('#weight-toggle', b);
-    S.weightField = b.dataset.weight === 'pop' ? S.cfg.population_field : null;
-    S.robust = null; resetMapVar();
-    if (S.run) renderAll();
-  }));
-  document.querySelectorAll('input[name=mapvar]').forEach(r => r.addEventListener('change', () => {
-    S.mapVar = r.value; renderMap(); updateLegend();
-  }));
+  document.querySelectorAll('input[name=mapvar]').forEach(r => r.addEventListener('change', () => { S.mapVar = r.value; renderMap(); }));
   $('drawer-handle').addEventListener('click', toggleDrawer);
   $('drawer-close').addEventListener('click', e => { e.stopPropagation(); closeDrawer(); });
   document.querySelectorAll('.dtab').forEach(btn => btn.addEventListener('click', e => {
@@ -199,103 +178,80 @@ function wireStatic() {
   });
 }
 
-/* ── Scenarios (thematic PTIs) ───────────────────────────── */
+/* ── Weighting schemes ───────────────────────────────────── */
 function buildScenarioSelect() {
   const sc = S.cfg.scenarios || [];
   $('scenario-select').innerHTML =
     sc.map(s => `<option value="${esc(s.id)}">${esc(s.label || s.id)}</option>`).join('') +
-    `<option value="__equal">Equal weights (all indicators)</option><option value="__custom">Custom</option>`;
+    `<option value="__custom">Custom</option>`;
 }
 
 function applyScenario(key) {
-  let weights;
   const hint = $('scenario-hint');
   if (key === '__custom') { hint.textContent = 'Set your own indicators and weights.'; return; }
-  if (key === '__equal') {
-    const ids = [...S.ind.keys()];
-    weights = equalSplit(ids);
-    hint.textContent = 'Every indicator at equal weight — a neutral baseline, not a recommendation.';
-  } else {
-    const sc = (S.cfg.scenarios || []).find(s => s.id === key);
-    if (!sc) return;
-    weights = sc.weights || {};
-    hint.textContent = sc.description || '';
-  }
-  for (const id of S.ind.keys()) setRow(id, weights[id] || 0, id in weights);
-  // Restore configured directions — a scenario defines the model, not just weights
-  for (const [id, m] of S.ind) setDirection(id, m.direction);
+  const sc = (S.cfg.scenarios || []).find(s => s.id === key);
+  if (!sc) return;
+  const w = sc.weights || {};
+  for (const id of S.ind.keys()) setRow(id, w[id] || 0);
+  hint.textContent = sc.description || '';
   updateWeightSummary();
-}
-
-function equalSplit(ids) {
-  const n = ids.length, base = Math.floor(100 / n), extra = 100 - base * n;
-  return Object.fromEntries(ids.map((id, i) => [id, base + (i < extra ? 1 : 0)]));
 }
 
 /* ── Indicator sidebar ───────────────────────────────────── */
 function buildIndicatorPanels() {
-  const cats = S.cfg.categories || [];
-  const order = cats.map(c => c.name);
-  const color = Object.fromEntries(cats.map(c => [c.name, c.color]));
+  const pillars = S.cfg.pillars || [];
+  const order = pillars.map(c => c.name);
+  const color = Object.fromEntries(pillars.map(c => [c.name, c.color]));
   const grouped = {};
-  for (const m of S.ind.values()) (grouped[m.category || 'Other'] ||= []).push(m);
+  for (const m of S.ind.values()) if (m.pti !== false) (grouped[m.pillar || 'Other'] ||= []).push(m);
   const names = [...new Set([...order, ...Object.keys(grouped).sort()])].filter(n => grouped[n]);
-  let html = '';
-  for (const cat of names) {
-    const collapsed = grouped[cat].length > 15;
-    html += `<div class="cat-section" data-cat="${esc(cat)}">
+  $('indicator-panels').innerHTML = names.map(p => {
+    const collapsed = grouped[p].length > 15;
+    return `<div class="cat-section" data-cat="${esc(p)}">
       <button class="cat-toggle" aria-expanded="${!collapsed}">
-        <span class="cat-dot" style="background:${esc(color[cat] || '#7f8c8d')}"></span>
-        <span class="cat-name">${esc(cat)}</span>
+        <span class="cat-dot" style="background:${esc(color[p] || '#7f8c8d')}"></span>
+        <span class="cat-name">${esc(p)}</span>
         <span class="cat-sel-count"></span>
         <span class="cat-arrow">▼</span>
       </button>
-      <div class="cat-rows${collapsed ? '' : ' open'}">${grouped[cat].map(indRow).join('')}</div></div>`;
-  }
-  $('indicator-panels').innerHTML = html;
+      <div class="cat-rows${collapsed ? '' : ' open'}">${grouped[p].map(indRow).join('')}</div></div>`;
+  }).join('');
   wireRows();
 }
 
+function levelBadges(m) {
+  return `<span class="lvl-badges" title="Available at: ${esc(m.levels.map(levelLabel).join(', '))}">${
+    S.levels.map(l => `<span class="lvl-b${m.levels.includes(l.key) ? ' on' : ''}">${esc(l.label[0])}</span>`).join('')}</span>`;
+}
+
 function indRow(m) {
-  const lv = levelOf(m.id);
-  const badge = lv.rank < S.base.rank
-    ? `<span class="ind-level" title="Measured at ${esc(lv.label)} level — the same value applies to every ${esc(S.base.label.toLowerCase())} in the ${esc(lv.label.toLowerCase())}">${esc(lv.label)}</span>` : '';
-  const sc = m.scoring?.type;
-  const sBadge = sc === 'categories' ? '<span class="ind-level ind-cat" title="Categorical: each value has a fixed score">cat</span>'
-    : sc === 'breaks' ? '<span class="ind-level ind-cat" title="Classed on fixed thresholds set in the configuration">fixed</span>' : '';
   const sub = [m.unit, m.year].filter(Boolean).join(' · ');
-  const tip = [m.label, m.description, m.source_note, m.unit && `Unit: ${m.unit}`, m.fill != null && `Missing values filled with: ${m.fill}`]
-    .filter(Boolean).join('\n');
-  const cat = sc === 'categories';
+  const tip = [m.label, m.description, m.source_note, m.unit && `Unit: ${m.unit}`,
+    `Available at: ${m.levels.map(levelLabel).join(', ')}`].filter(Boolean).join('\n');
   return `<div class="ind-row dimmed" id="row-${esc(m.id)}">
     <div class="ind-check"><input type="checkbox" id="chk-${esc(m.id)}" data-id="${esc(m.id)}"/></div>
     <label class="ind-name-wrap" for="chk-${esc(m.id)}" title="${esc(tip)}">
-      <div class="ind-name">${esc(m.label || m.id)}${badge}${sBadge}</div>
-      ${sub ? `<div class="ind-source">${esc(sub)}</div>` : ''}
+      <div class="ind-name">${esc(m.label || m.id)}</div>
+      <div class="ind-source">${levelBadges(m)}${sub ? ` ${esc(sub)}` : ''}</div>
     </label>
     <div class="ind-weight">
-      <input type="number" class="weight-num" id="wnum-${esc(m.id)}" data-id="${esc(m.id)}" min="0" max="100" value="0"/>
-      <input type="range" class="weight-slider" id="wsl-${esc(m.id)}" data-id="${esc(m.id)}" min="0" max="100" value="0"/>
+      <input type="number" class="weight-num" id="wnum-${esc(m.id)}" data-id="${esc(m.id)}" step="0.5" value="0"/>
+      <input type="range" class="weight-slider" id="wsl-${esc(m.id)}" data-id="${esc(m.id)}" min="-3" max="3" step="0.5" value="0"/>
     </div>
-    <button class="dir-btn" id="dir-${esc(m.id)}" data-id="${esc(m.id)}" ${cat ? 'disabled title="Categorical scores set the direction"' : ''}></button>
   </div>`;
 }
 
-function setDirection(id, dir) {
-  const b = $(`dir-${id}`);
-  if (!b) return;
-  const d = dir === 'descending' || dir === 'desc' ? 'descending' : 'ascending';
-  b.dataset.dir = d;
-  b.textContent = d === 'ascending' ? '↑' : '↓';
-  if (!b.disabled) b.title = d === 'ascending' ? 'Higher value → higher PTI score' : 'Higher value → lower PTI score';
-}
-
-function setRow(id, w, on) {
+function setRow(id, w) {
   const cb = $(`chk-${id}`);
   if (!cb) return;
-  cb.checked = on;
-  $(`wnum-${id}`).value = w; $(`wsl-${id}`).value = w;
-  $(`row-${id}`).classList.toggle('dimmed', !on);
+  w = +w || 0;
+  cb.checked = w !== 0;
+  $(`wnum-${id}`).value = w;
+  $(`wsl-${id}`).value = Math.max(-3, Math.min(3, w));
+  const row = $(`row-${id}`);
+  row.classList.toggle('dimmed', w === 0);
+  row.classList.toggle('w-pos', w > 0);
+  row.classList.toggle('w-neg', w < 0);
 }
 
 function wireRows() {
@@ -305,164 +261,118 @@ function wireRows() {
     btn.nextElementSibling.classList.toggle('open', !exp);
   }));
   document.querySelectorAll('#indicator-panels input[type=checkbox]').forEach(cb => cb.addEventListener('change', () => {
-    $(`row-${cb.dataset.id}`).classList.toggle('dimmed', !cb.checked); markCustom(); updateWeightSummary();
+    const id = cb.dataset.id, m = S.ind.get(id);
+    // Ticking suggests a sign from the indicator's hint; unticking clears it
+    setRow(id, cb.checked ? (m.higher_is_worse === false ? -1 : 1) : 0);
+    markCustom(); updateWeightSummary();
   }));
   document.querySelectorAll('.weight-slider').forEach(sl => sl.addEventListener('input', () => {
-    $(`wnum-${sl.dataset.id}`).value = sl.value; autoCheck(sl.dataset.id, +sl.value); markCustom(); updateWeightSummary();
+    setRow(sl.dataset.id, +sl.value); markCustom(); updateWeightSummary();
   }));
   document.querySelectorAll('.weight-num').forEach(n => n.addEventListener('change', () => {
-    $(`wsl-${n.dataset.id}`).value = n.value; autoCheck(n.dataset.id, +n.value); markCustom(); updateWeightSummary();
+    setRow(n.dataset.id, +n.value); markCustom(); updateWeightSummary();
   }));
-  document.querySelectorAll('.dir-btn').forEach(btn => btn.addEventListener('click', () => {
-    if (btn.disabled) return;
-    setDirection(btn.dataset.id, btn.dataset.dir === 'ascending' ? 'descending' : 'ascending'); markCustom();
-  }));
-  for (const [id, m] of S.ind) setDirection(id, m.direction);
 }
 
-function autoCheck(id, w) { if (w > 0 && !$(`chk-${id}`).checked) { $(`chk-${id}`).checked = true; $(`row-${id}`).classList.remove('dimmed'); } }
-function markCustom() { if ($('scenario-select').value !== '__custom') { $('scenario-select').value = '__custom'; $('scenario-hint').textContent = 'Custom configuration.'; } }
+function markCustom() {
+  if ($('scenario-select').value !== '__custom') { $('scenario-select').value = '__custom'; $('scenario-hint').textContent = 'Custom weights.'; }
+}
 
-function selectedConfig() {
-  const out = [];
-  document.querySelectorAll('#indicator-panels input[type=checkbox]').forEach(cb => {
-    if (!cb.checked) return;
-    const id = cb.dataset.id, w = +($(`wnum-${id}`).value || 0);
-    if (w > 0) out.push({ id, weight: w, direction: $(`dir-${id}`).dataset.dir });
-  });
-  return out;
+function currentWeights() {
+  const w = {};
+  document.querySelectorAll('.weight-num').forEach(n => { const v = +n.value; if (v) w[n.dataset.id] = v; });
+  return w;
 }
 
 function updateWeightSummary() {
-  let total = 0, n = 0;
-  document.querySelectorAll('#indicator-panels input[type=checkbox]').forEach(cb => {
-    if (!cb.checked) return; n++; total += +($(`wnum-${cb.dataset.id}`).value || 0);
-  });
-  const ok = Math.abs(total - 100) < 1e-9;
-  $('weight-total').textContent = total;
-  $('weight-total').style.color = ok ? '#27ae60' : total > 100 ? '#e74c3c' : '';
+  const w = currentWeights(), n = Object.keys(w).length;
   $('sel-count').textContent = `${n} selected`;
-  $('wbar-fill').style.width = Math.min(100, total) + '%';
-  $('wbar-fill').style.background = ok ? '#27ae60' : total > 100 ? '#e74c3c' : '';
   document.querySelectorAll('.cat-section').forEach(sec => {
-    const c = sec.querySelectorAll('input[type=checkbox]:checked').length;
+    const c = [...sec.querySelectorAll('.weight-num')].filter(x => +x.value).length;
     sec.querySelector('.cat-sel-count').textContent = c ? `${c} ✓` : '';
   });
 }
 
-function equalizeWeights() {
-  const ids = selectedIds();
-  if (!ids.length) return;
-  const w = equalSplit(ids);
-  ids.forEach(id => setRow(id, w[id], true));
+function unitWeights() {
+  for (const [id, v] of Object.entries(currentWeights())) setRow(id, Math.sign(v));
   markCustom(); updateWeightSummary();
 }
-const selectedIds = () => [...document.querySelectorAll('#indicator-panels input[type=checkbox]:checked')].map(c => c.dataset.id);
 
 /* ── Run ─────────────────────────────────────────────────── */
 function runPTI() {
-  const sel = selectedConfig();
-  if (!sel.length) return alert('Select at least one indicator with a weight above 0.');
-  const total = sel.reduce((s, c) => s + c.weight, 0);
-  if (Math.abs(total - 100) > 1e-9) return alert(`Weights must sum to 100 (currently ${total}).\nAdjust them, use "= Equal", or pick a thematic PTI.`);
-
+  const weights = currentWeights();
+  if (!Object.keys(weights).length) return alert('Give at least one indicator a non-zero weight.');
+  S.run = { weights, scheme: $('scenario-select').value, schemeLabel: $('scenario-select').selectedOptions[0]?.text, date: new Date() };
+  S.robust = null; resetMapVar();
+  renderAll();
+  $('results-toggle').style.display = ''; $('save-run-btn').style.display = '';
+  $('last-run-label').textContent = `Run at ${S.run.date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  $('last-run-label').style.display = 'inline';
+  openDrawer();
   const btn = $('calc-btn');
-  btn.disabled = true; btn.textContent = 'Calculating…';
-  setTimeout(() => {
-    try {
-      const opts = { method: S.method, nClasses: S.nClasses };
-      const parts = sel.map(c => {
-        const m = S.ind.get(c.id);
-        const r = PTICore.scoreIndicator(S.units, { ...m, direction: c.direction, codeField: levelOf(c.id).code }, opts);
-        return { ...c, ...r, meta: m };
-      });
-      const degenerate = parts.filter(p => p.degenerate).map(p => p.meta.label);
-      const minCov = S.cfg.min_coverage ?? 1;
-      const comp = PTICore.composite(parts, S.nClasses, minCov);
-      S.run = { parts, comp, method: S.method, nClasses: S.nClasses, minCoverage: minCov,
-        scenario: $('scenario-select').value, scenarioLabel: $('scenario-select').selectedOptions[0]?.text,
-        date: new Date() };
-      S.robust = null; resetMapVar();
-      renderAll();
-      if (degenerate.length) alert(`These indicators have no variation under this classification and score nothing:\n• ${degenerate.join('\n• ')}`);
-      $('results-toggle').style.display = ''; $('save-run-btn').style.display = '';
-      $('last-run-label').textContent = `Run at ${S.run.date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-      $('last-run-label').style.display = 'inline';
-      openDrawer();
-      btn.innerHTML = '✓ Done'; btn.style.background = '#27ae60';
-    } catch (err) {
-      console.error(err); alert('PTI error: ' + err.message); S.run = null;
-    }
-    setTimeout(() => { btn.disabled = false; btn.style.background = ''; btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><polygon points="3,1 13,7 3,13" fill="currentColor"/></svg> Run PTI'; }, 1200);
-  }, 20);
+  btn.innerHTML = '✓ Done'; btn.style.background = '#27ae60';
+  setTimeout(() => { btn.style.background = ''; btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><polygon points="3,1 13,7 3,13" fill="currentColor"/></svg> Run PTI'; }, 1200);
 }
 
-/* ── Level rows ──────────────────────────────────────────── */
-/* Rows at the level shown. Base level: one per unit with its parents.
- * Coarser: base-unit scores aggregated (population-weighted if chosen). */
-function levelRows(values) {
-  const L = S.levelByKey[S.level];
-  const labels = S.cfg.priority_labels || ['Very low', 'Low', 'Moderate', 'High', 'Very high'];
-  let rows;
-  if (L === S.base) {
-    rows = S.units.map((u, i) => ({
-      code: u[L.code], name: u[L.name], i, score: values[i], coverage: S.run.comp.coverage[i],
-      parents: S.levels.slice(0, -1).map(p => u[p.name]), weight: S.weightField ? u[S.weightField] : null, count: 1,
-    })).filter(r => r.score != null);
-  } else {
-    rows = PTICore.aggregate(S.units, values, L.code, L.name, S.weightField)
-      .map(r => ({ ...r, score: r.mean }));
-    if (L.rank > 0) {
-      const parentOf = {};
-      S.units.forEach(u => { parentOf[u[L.code]] ||= S.levels.slice(0, L.rank).map(p => u[p.name]); });
-      rows.forEach(r => { r.parents = parentOf[r.code]; });
-    }
-  }
-  const cls = PTICore.priorityClasses(rows.map(r => r.score), labels.length);
-  rows.forEach((r, k) => { r.cls = cls[k]; r.priority = cls[k] ? labels[cls[k] - 1] : ''; });
-  rows.sort((a, b) => b.score - a.score);
-  rows.forEach((r, k) => { r.rank = k + 1; });
-  return rows;
-}
-
+/* Compute the PTI at the level shown and build the result rows */
 function renderAll() {
   if (!S.run) return;
-  S.rows = levelRows(S.run.comp.index);
-  if (S.robust) S.rows.forEach(r => { r.robust = S.robust.byCode.get(r.code); });
-  const pf = S.portfolio;
-  if (pf) attachPortfolio();
+  const T = S.levelByKey[S.level];
+  S.res = PTICore.computePTI(S.model, S.level, S.run.weights, opts());
+  S.groups = PTICore.priorityGroups(S.res.score, S.bins);
+  const parents = S.levels.slice(0, T.rank);
+  const missingIds = i => S.res.parts.filter(p => p.z[i] == null).map(p => p.id);
+  S.rows = T.rows.map((r, i) => ({
+    i, code: r[T.code], name: r[T.name], parents: parents.map(p => r[p.name]),
+    score: S.res.score[i], priority: S.groups.priority[i], population: r.population ?? null,
+    missing: S.res.score[i] == null || S.cfg.missing === 'ignore' ? missingIds(i) : [],
+  }));
+  if (S.robust) S.rows.forEach(r => { r.robust = S.robust.freq[r.i]; });
+  if (S.portfolio) attachPortfolio();
+  rankRows();
   updateLevelNote(); updateCoverageChip();
-  renderMap(); buildTable(filterRows()); updateLegend();
+  renderMap(); buildTable(filterRows());
   if ($('drawer-dist').classList.contains('active')) renderDistribution();
   if ($('drawer-portfolio').classList.contains('active')) renderPortfolio();
+  if ($('compare-select').value) onCompare();
   $('map-empty').classList.add('hidden');
 }
 
-/* At a level finer than the coarsest selected indicator, part of the score
- * is a constant broadcast from the parent — say so. */
+function rankRows() {
+  const scored = S.rows.filter(r => r.score != null).sort((a, b) => b.score - a.score);
+  scored.forEach((r, k) => { r.rank = k + 1; });
+  S.rows.filter(r => r.score == null).forEach(r => { r.rank = null; });
+  S.rows.sort((a, b) => (a.rank ?? 1e12) - (b.rank ?? 1e12));
+}
+
+/* Which indicators are native, projected from a coarser level, or excluded */
 function updateLevelNote() {
   const el = $('level-note');
-  if (!S.run) { el.textContent = ''; return; }
-  const coarse = S.run.parts.reduce((a, p) => Math.min(a, levelOf(p.id).rank), S.base.rank);
-  const shown = S.levelByKey[S.level].rank;
-  if (shown <= coarse) { el.textContent = ''; el.className = 'level-note'; return; }
-  const lv = S.levels[coarse], n = S.run.parts.filter(p => levelOf(p.id).rank === coarse).length;
-  el.className = 'level-note warn';
-  el.textContent = `${n} indicator${n > 1 ? 's' : ''} measured at ${lv.label} level — below that the score varies only with the finer indicators.`;
+  const proj = S.res.parts.filter(p => p.via === 'projected');
+  const agg = S.res.parts.filter(p => p.via === 'aggregated');
+  const lines = [];
+  if (proj.length) lines.push(`Projected from a coarser level (same value for every unit inside it): ${proj.map(p => `${S.ind.get(p.id).label} (${levelLabel(p.from)})`).join(', ')}.`);
+  if (agg.length) lines.push(`Averaged from finer-level z-scores (devPTIpack code mode): ${agg.map(p => `${S.ind.get(p.id).label} (${levelLabel(p.from)})`).join(', ')}.`);
+  if (S.res.excluded.length) lines.push(`<b>Not used at ${esc(levelLabel(S.level))} level</b> — only available at finer levels: ${S.res.excluded.map(id => esc(S.ind.get(id).label)).join(', ')}.`);
+  el.innerHTML = lines.map(l => `<div>${l.startsWith('<b>') ? l : esc(l)}</div>`).join('');
+  el.className = lines.length ? 'level-note warn' : 'level-note';
 }
 
 function updateCoverageChip() {
-  const c = S.run.comp, n = S.units.length;
-  const unscored = c.index.filter(v => v == null).length;
-  const partial = c.coverage.filter((v, i) => c.index[i] != null && v < 0.999).length;
   const chip = $('coverage-chip');
-  if (!unscored && !partial) { chip.style.display = 'none'; return; }
-  const gaps = S.run.parts.filter(p => p.missing).map(p => `${p.meta.label}: ${p.missing.toLocaleString()} missing`);
-  const filled = S.run.parts.filter(p => p.filled).map(p => `${p.meta.label}: ${p.filled.toLocaleString()} filled (${p.meta.fill})`);
+  const none = S.rows.filter(r => r.score == null).length;
+  if (!none && S.cfg.missing !== 'ignore') { chip.style.display = 'none'; return; }
+  const counts = {};
+  for (const r of S.rows) for (const id of r.missing) counts[id] = (counts[id] || 0) + 1;
+  const detail = Object.entries(counts).map(([id, n]) => `${S.ind.get(id).label}: ${n.toLocaleString()} missing`);
+  if (!detail.length && !none) { chip.style.display = 'none'; return; }
   chip.style.display = '';
-  chip.textContent = unscored ? `${unscored.toLocaleString()} of ${n.toLocaleString()} unscored` : `${partial.toLocaleString()} partly scored`;
-  chip.title = [`Units need ≥${Math.round((S.run.minCoverage) * 100)}% of the selected weight present to be scored;`,
-    'partly scored units are renormalised over the indicators they have.', '', ...gaps, ...filled].join('\n');
+  chip.textContent = S.cfg.missing === 'ignore'
+    ? `${Object.values(counts).reduce((a, b) => Math.max(a, b), 0).toLocaleString()} scored without some data`
+    : `${none.toLocaleString()} of ${S.rows.length.toLocaleString()} have no data`;
+  chip.title = (S.cfg.missing === 'ignore'
+    ? 'Missing values are left out of the sum for those units (missing: ignore).'
+    : 'Units missing any selected indicator get no score and no priority (devPTIpack default).') + '\n\n' + detail.join('\n');
 }
 
 /* ── Map ─────────────────────────────────────────────────── */
@@ -488,8 +398,10 @@ function mapView() {
 
 function baseLayers() {
   const bm = S.cfg.basemap || DEFAULT_BASEMAP;
-  const out = [{ sourcetype: 'raster', below: 'traces', source: bm.tiles, sourceattribution: bm.attribution || '' }];
-  return { under: out, labels: bm.labels ? [{ sourcetype: 'raster', source: bm.labels }] : [] };
+  return {
+    under: [{ sourcetype: 'raster', below: 'traces', source: bm.tiles, sourceattribution: bm.attribution || '' }],
+    labels: bm.labels ? [{ sourcetype: 'raster', source: bm.labels }] : [],
+  };
 }
 
 function overlayLayersAndTraces() {
@@ -518,76 +430,153 @@ function featureLabel(ov, p) {
   return [`<b>${esc(head ?? '')}</b>`, ...rest.map(esc)].join('<br>');
 }
 
-function drawEmptyMap() {
-  const { under, labels } = baseLayers();
-  const v = mapView();
-  Plotly.newPlot('map-plotly', [{ type: 'scattermap', lat: [], lon: [], showlegend: false }],
-    { map: { style: 'white-bg', layers: [...under, ...labels], ...v }, margin: { t: 0, b: 0, l: 0, r: 0 }, uirevision: S.cfg.id, showlegend: false },
+function drawBaseMap() {
+  const { under, labels } = baseLayers(), ov = overlayLayersAndTraces();
+  Plotly.react('map-plotly', [{ type: 'scattermap', lat: [], lon: [], showlegend: false }, ...ov.traces],
+    { map: { style: 'white-bg', layers: [...under, ...ov.layers, ...labels], ...mapView() }, margin: { t: 0, b: 0, l: 0, r: 0 }, uirevision: S.cfg.id, showlegend: false },
     { responsive: true, displayModeBar: false });
 }
 
+/* Discrete colours for m priority groups, Priority 1 first */
+function groupColors(m) {
+  if (m <= 1) return [RDYLBU[1]];
+  return Array.from({ length: m }, (_, k) => RDYLBU[Math.round(k * (RDYLBU.length - 1) / (m - 1))]);
+}
+
+/* Values for the map variable at the level shown: { z, text, scale, legend } */
+function mapValues(T) {
+  const look = new Map(S.rows.map(r => [String(r.code), r]));
+  if (S.mapVar === 'indicator') return explorerValues(T);
+  if (!S.run) return null;
+  if (S.mapVar === 'robust' && S.robust) {
+    return { get: r => (r.robust != null ? r.robust * 100 : null), scale: ROBUST_SCALE, zmin: 0, zmax: 100, look,
+      legend: { title: `Robustness — in top ${Math.round(S.robust.topShare * 100)}%`, ticks: ['0%', '50%', '100%'], low: 'Rarely', high: 'Always' } };
+  }
+  if (S.mapVar === 'score') {
+    const v = S.rows.map(r => r.score).filter(isNum), a = Math.max(1e-9, ...v.map(Math.abs));
+    return { get: r => r.score, scale: DIV_SCALE, zmin: -a, zmax: a, look,
+      legend: { title: 'PTI score (Σ weight × z)', ticks: [fmt(-a, 2), '0', fmt(a, 2)], low: 'Lower priority', high: 'Higher priority' } };
+  }
+  const m = S.groups.groups, cols = groupColors(m);
+  const steps = [];
+  [...cols, NO_DATA].forEach((c, k, arr) => { steps.push([k / arr.length, c], [(k + 1) / arr.length, c]); });
+  return { get: r => (r.priority ?? m + 1), scale: steps, zmin: 0.5, zmax: m + 1.5, look, discrete: { m, cols } };
+}
+
+/* Data explorer: one indicator's values, at this level if available there,
+ * else the coarser level it would be projected from */
+function explorerValues(T) {
+  const id = S.explorerId;
+  const m = S.ind.get(id);
+  if (!m) return null;
+  let src = T, note = '';
+  if (!m.levels.includes(T.key)) {
+    const coarser = S.levels.slice(0, T.rank).filter(l => m.levels.includes(l.key));
+    if (!coarser.length) return { empty: `${m.label} is not available at ${T.label} level or coarser.` };
+    src = coarser[coarser.length - 1]; note = ` (${src.label} value)`;
+  }
+  const val = r => {
+    if (src === T) return isNum(r[id]) ? r[id] : null;
+    const i = src.index.get(String(r[src.code]));
+    return i === undefined ? null : (isNum(src.rows[i][id]) ? src.rows[i][id] : null);
+  };
+  const vals = T.rows.map(val), f = vals.filter(isNum);
+  const lo = Math.min(...f), hi = Math.max(...f);
+  const look = new Map(T.rows.map((r, i) => [String(r[T.code]), { code: r[T.code], name: r[T.name], value: vals[i] }]));
+  const scale = m.higher_is_worse === false ? SEQ_SCALE.map(([t, c], k, a) => [t, a[a.length - 1 - k][1]]) : SEQ_SCALE;
+  return { get: r => r.value, scale, zmin: lo, zmax: hi === lo ? lo + 1 : hi, look, explorer: true,
+    legend: { title: `${m.label}${note}${m.unit ? ` · ${m.unit}` : ''}`, ticks: [fmt(lo), fmt((lo + hi) / 2), fmt(hi)],
+      low: m.higher_is_worse === false ? 'worse' : '', high: m.higher_is_worse === false ? 'better' : (m.higher_is_worse ? 'worse' : '') } };
+}
+
 function renderMap() {
-  if (!S.run) return;
-  const L = S.levelByKey[S.level];
-  const gj = S.geo[L.key];
+  const T = S.levelByKey[S.level];
+  const gj = S.geo[T.key];
   if (!gj) {
-    $('map-empty').classList.remove('hidden');
-    $('map-empty').querySelector('.empty-sub').textContent = `${L.label} boundaries loading… results are in the drawer below.`;
+    if (S.run) {
+      $('map-empty').classList.remove('hidden');
+      $('map-empty').querySelector('.empty-sub').textContent = `${T.label} boundaries loading… results are in the drawer below.`;
+    }
     return;
   }
-  const robust = S.mapVar === 'robust' && S.robust;
-  const look = new Map(S.rows.map(r => [String(r.code), r]));
+  const mv = mapValues(T);
+  if (!mv) return;
+  if (mv.empty) { alert(mv.empty); return; }
   const ids = [], z = [], text = [];
   for (const f of gj.features) {
-    const id = String(f.properties[L.code]);
-    const r = look.get(id);
+    const id = String(f.properties[T.code]);
+    const r = mv.look.get(id);
     ids.push(id);
-    const val = r ? (robust ? (r.robust != null ? r.robust * 100 : null) : r.score) : null;
-    z.push(val);
-    const nm = f.properties[L.name] ?? id;
-    text.push(r ? `<b>${esc(nm)}</b><br>PTI ${r.score.toFixed(1)} · ${esc(r.priority)}${r.robust != null ? `<br>Top group in ${Math.round(r.robust * 100)}% of draws` : ''}` : `<b>${esc(nm)}</b><br>not scored`);
+    z.push(r ? mv.get(r) : null);
+    const nm = esc(f.properties[T.name] ?? id);
+    if (mv.explorer) text.push(`<b>${nm}</b><br>${r && r.value != null ? fmt(r.value) : 'No data'}`);
+    else text.push(r ? `<b>${nm}</b><br>PTI ${r.score == null ? 'no data' : fmt(r.score, 3)}${r.priority ? ` · Priority ${r.priority}${r.priority === 1 ? ' (highest)' : ''}` : ''}${r.robust != null ? `<br>Top group in ${Math.round(r.robust * 100)}% of draws` : ''}` : `<b>${nm}</b>`);
   }
   const trace = {
     type: 'choroplethmap', geojson: gj, locations: ids, z, text, hoverinfo: 'text',
-    featureidkey: `properties.${L.code}`,
-    colorscale: robust ? ROBUST_SCALE : SCORE_SCALE, zmin: 0, zmax: 100,
-    marker: { opacity: 0.82, line: { width: L === S.base ? 0.2 : 0.6, color: '#fff' } }, showscale: false,
+    featureidkey: `properties.${T.code}`, colorscale: mv.scale, zmin: mv.zmin, zmax: mv.zmax,
+    marker: { opacity: 0.82, line: { width: T.rank === S.levels.length - 1 ? 0.2 : 0.6, color: '#fff' } }, showscale: false,
   };
-  const { under, labels } = baseLayers();
-  const ov = overlayLayersAndTraces();
-  const layout = {
-    map: { style: 'white-bg', layers: [...under, ...ov.layers, ...labels], ...(S.mapRendered ? {} : mapView()) },
-    margin: { t: 0, b: 0, l: 0, r: 0 }, uirevision: S.cfg.id, showlegend: false,
-    dragmode: S.aoiMode ? 'lasso' : 'pan',
-  };
-  if (S.mapRendered) delete layout.map.center;
-  const cfg = { responsive: true, displayModeBar: false };
+  const { under, labels } = baseLayers(), ov = overlayLayersAndTraces();
   const div = $('map-plotly');
+  const view = S.mapRendered && div._fullLayout?.map ? { center: div._fullLayout.map.center, zoom: div._fullLayout.map.zoom } : mapView();
+  const layout = {
+    map: { style: 'white-bg', layers: [...under, ...ov.layers, ...labels], ...view },
+    margin: { t: 0, b: 0, l: 0, r: 0 }, uirevision: S.cfg.id, showlegend: false, dragmode: S.aoiMode ? 'lasso' : 'pan',
+  };
+  const cfg = { responsive: true, displayModeBar: false };
   if (!S.mapRendered) {
-    Plotly.newPlot(div, [trace, ...ov.traces], { ...layout, map: { ...layout.map, ...mapView() } }, cfg);
+    Plotly.newPlot(div, [trace, ...ov.traces], layout, cfg);
     S.mapRendered = true;
     div.on('plotly_click', onMapClick);
     div.on('plotly_selected', onAOISelected);
     div.on('plotly_deselect', clearAOI);
   } else {
-    Plotly.react(div, [trace, ...ov.traces], { ...layout, map: { ...layout.map, center: div._fullLayout?.map?.center, zoom: div._fullLayout?.map?.zoom } }, cfg);
+    Plotly.react(div, [trace, ...ov.traces], layout, cfg);
   }
   S.mapIds = ids;
-  $('map-legend').classList.add('visible');
+  updateLegend(mv);
   $('map-empty').classList.add('hidden');
+}
+
+function updateLegend(mv) {
+  $('map-legend').classList.add('visible');
+  if (mv.discrete) {
+    $('legend-title').textContent = `PTI priority · ${levelLabel(S.level)}`;
+    $('legend-continuous').style.display = 'none';
+    const counts = {};
+    S.rows.forEach(r => { const k = r.priority ?? 0; counts[k] = (counts[k] || 0) + 1; });
+    const g = S.groups;
+    const items = mv.discrete.cols.map((c, k) => {
+      const p = k + 1, lab = g.categorical ? g.labels[k] : `${fmt(g.labels[k][0], 2)} – ${fmt(g.labels[k][1], 2)}`;
+      return `<div class="lg-row"><span class="lg-sw" style="background:${c}"></span><span class="lg-name">Priority ${p}${p === 1 ? ' <i>(highest)</i>' : ''}</span><span class="lg-int">${lab}</span><span class="lg-n">${counts[p] || 0}</span></div>`;
+    });
+    if (counts[0]) items.push(`<div class="lg-row"><span class="lg-sw" style="background:${NO_DATA}"></span><span class="lg-name">No data</span><span class="lg-int"></span><span class="lg-n">${counts[0]}</span></div>`);
+    $('legend-classes').innerHTML = items.join('');
+    $('legend-classes').style.display = '';
+    $('legend-caveat').textContent = 'Equal-size quantile groups of the PTI at this level. Relative ranking — depends on the indicators and weights chosen.';
+  } else {
+    $('legend-classes').style.display = 'none';
+    $('legend-continuous').style.display = '';
+    $('legend-title').textContent = mv.legend.title;
+    $('legend-gradient').style.background = `linear-gradient(to right, ${mv.scale.map(s => s[1]).join(',')})`;
+    $('legend-ticks').innerHTML = mv.legend.ticks.map(t => `<span>${esc(t)}</span>`).join('');
+    $('legend-low').textContent = mv.legend.low; $('legend-high').textContent = mv.legend.high;
+    $('legend-caveat').textContent = mv.explorer ? 'Data explorer — raw indicator values.' : 'Relative ranking — depends on the indicators and weights chosen.';
+  }
 }
 
 function onMapClick(ev) {
   if (S.aoiMode) return;
   const pt = ev.points[0];
   if (!pt) return;
-  if (pt.curveNumber !== 0) { // overlay feature
+  if (pt.curveNumber !== 0) {
     const rect = $('map-area').getBoundingClientRect();
     showTooltip((pt.bbox?.x1 ?? 200) - rect.left, (pt.bbox?.y1 ?? 200) - rect.top, pt.text);
     return;
   }
   hideTooltip();
-  showUnitPanel(S.mapIds[pt.pointIndex]);
+  if (S.run) showUnitPanel(S.mapIds[pt.pointIndex]);
 }
 
 function showTooltip(x, y, html) {
@@ -599,133 +588,85 @@ function showTooltip(x, y, html) {
 }
 function hideTooltip() { $('map-tooltip').style.display = 'none'; }
 
-function updateLegend() {
-  if (!S.run) return;
-  const robust = S.mapVar === 'robust' && S.robust;
-  const leg = S.cfg.legend || {};
-  $('legend-title').textContent = robust ? `Robustness — in top ${Math.round(S.robust.topShare * 100)}%` : 'PTI score';
-  $('legend-gradient').style.background = `linear-gradient(to right, ${(robust ? ROBUST_SCALE : SCORE_SCALE).map(s => s[1]).join(',')})`;
-  $('legend-ticks').innerHTML = robust ? '<span>0%</span><span>50%</span><span>100%</span>' : '<span>0</span><span>25</span><span>50</span><span>75</span><span>100</span>';
-  $('legend-low').textContent = robust ? 'Rarely' : (leg.low || 'Lower priority');
-  $('legend-high').textContent = robust ? 'Always' : (leg.high || 'Higher priority');
-  const v = S.rows.map(r => r.score);
-  if (!v.length) { $('legend-stats').innerHTML = ''; return; }
-  const L = S.levelByKey[S.level];
-  const mean = v.reduce((a, b) => a + b, 0) / v.length;
-  $('legend-stats').innerHTML = `
-    <span><span>Mean</span><b>${mean.toFixed(1)}</b></span>
-    <span><span>Min – Max</span><b>${Math.min(...v).toFixed(1)} – ${Math.max(...v).toFixed(1)}</b></span>
-    <span><span>${esc(L.label)}s scored</span><b>${v.length.toLocaleString()}</b></span>
-    <span><span>Classes</span><b>${S.run.nClasses} · ${S.run.method}</b></span>`;
-}
-
-/* ── Unit profile ("layer query") ────────────────────────── */
-function membersOf(code) {
-  const L = S.levelByKey[S.level];
-  if (L === S.base) return S.units.map((u, i) => (String(u[L.code]) === String(code) ? i : -1)).filter(i => i >= 0);
-  const out = [];
-  S.units.forEach((u, i) => { if (String(u[L.code]) === String(code)) out.push(i); });
-  return out;
+/* ── Unit profile ────────────────────────────────────────── */
+/* Raw value of indicator `id` behind unit i's z-score (native or parent's) */
+function rawValue(part, T, i) {
+  if (part.via === 'native') return T.rows[i][part.id];
+  if (part.via === 'projected') {
+    const P = S.levelByKey[part.from], j = P.index.get(String(T.rows[i][P.code]));
+    return j === undefined ? null : P.rows[j][part.id];
+  }
+  return null;
 }
 
 function showUnitPanel(code) {
+  const T = S.levelByKey[S.level];
   const r = S.rows.find(x => String(x.code) === String(code));
-  const L = S.levelByKey[S.level];
-  $('unit-title').textContent = `${L.label}`;
-  if (!r) {
-    $('unit-body').innerHTML = `<div class="unit-head"><b>${esc(code)}</b></div><div class="muted small">Not scored — too little of the selected weight has data here.</div>`;
-    $('unit-panel').style.display = '';
-    return;
-  }
-  const idx = membersOf(code).filter(i => S.run.comp.index[i] != null);
-  const wt = i => (S.weightField && isNum(S.units[i][S.weightField]) && S.units[i][S.weightField] > 0 ? S.units[i][S.weightField] : (S.weightField ? 0 : 1));
-  const avg = get => {
-    let s = 0, w = 0;
-    for (const i of idx) { const v = get(i); if (v == null) continue; const k = wt(i) || (S.weightField ? 0 : 1); s += v * k; w += k; }
-    if (!w) { const vs = idx.map(get).filter(v => v != null); return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null; }
-    return s / w;
-  };
-  const total = S.run.parts.reduce((s, p) => s + p.weight, 0);
-  const n = S.run.nClasses;
-  const lines = S.run.parts.map(p => {
-    const score = avg(i => p.scores[i]);
-    const raw = avg(i => (isNum(S.units[i][p.id]) ? S.units[i][p.id] : null));
-    const pts = score == null ? null : (score - 1) / (n - 1) * 100 * p.weight / total;
-    return { p, score, raw, pts };
-  }).sort((a, b) => (b.pts ?? -1) - (a.pts ?? -1));
-  const pfCount = r.projects != null ? `<span><span>Projects</span><b>${r.projects}</b></span>` : '';
+  if (!r) return;
+  const terms = PTICore.contributions(S.res.parts, r.i).sort((a, b) => Math.abs(b.term ?? 0) - Math.abs(a.term ?? 0));
+  const maxAbs = Math.max(1e-9, ...terms.map(t => Math.abs(t.term ?? 0)));
+  $('unit-title').textContent = T.label;
+  const pf = r.projects != null ? `<span><span>Projects</span><b>${r.projects}</b></span>` : '';
   $('unit-body').innerHTML = `
-    <div class="unit-head"><b>${esc(r.name ?? r.code)}</b>${r.parents ? `<div class="muted small">${esc(r.parents.filter(Boolean).join(' · '))}</div>` : ''}</div>
-    <div class="unit-score"><span class="tt-score">${r.score.toFixed(1)}</span>
-      <span class="need-badge ${badgeCss(r.cls)}">${esc(r.priority)}</span>
-      <span class="muted small">rank ${r.rank} of ${S.rows.length.toLocaleString()}</span></div>
+    <div class="unit-head"><b>${esc(r.name ?? r.code)}</b>${r.parents?.length ? `<div class="muted small">${esc(r.parents.filter(Boolean).join(' · '))}</div>` : ''}</div>
+    <div class="unit-score"><span class="tt-score">${r.score == null ? '—' : fmt(r.score, 3)}</span>
+      ${r.priority ? `<span class="prio-badge" style="background:${groupColors(S.groups.groups)[r.priority - 1]}">Priority ${r.priority}</span>` : '<span class="prio-badge nodata">No data</span>'}
+      ${r.rank ? `<span class="muted small">rank ${r.rank} of ${S.rows.filter(x => x.rank).length.toLocaleString()}</span>` : ''}</div>
     <div class="unit-kv">
-      ${L !== S.base ? `<span><span>${esc(S.base.label)}s</span><b>${r.count.toLocaleString()}</b></span>` : ''}
-      ${r.weight ? `<span><span>Population</span><b>${Math.round(r.weight).toLocaleString()}</b></span>` : ''}
-      ${r.coverage != null && r.coverage < 0.999 ? `<span><span>Data coverage</span><b>${Math.round(r.coverage * 100)}% of weight</b></span>` : ''}
+      ${r.population != null ? `<span><span>Population</span><b>${Math.round(r.population).toLocaleString()}</b></span>` : ''}
+      ${r.missing.length ? `<span><span>Missing</span><b>${esc(r.missing.map(id => S.ind.get(id).label).join(', '))}</b></span>` : ''}
       ${r.robust != null ? `<span><span>Top group in</span><b>${Math.round(r.robust * 100)}% of draws</b></span>` : ''}
-      ${pfCount}
+      ${pf}
     </div>
-    <div class="unit-sub">Contribution to the score${L !== S.base ? ` <span class="muted">(${S.weightField ? 'population-weighted ' : ''}average of ${S.base.label.toLowerCase()}s)</span>` : ''}</div>
-    <table class="unit-table"><thead><tr><th>Indicator</th><th>Value</th><th>Class</th><th>Wt</th><th>Points</th></tr></thead><tbody>
-    ${lines.map(({ p, score, raw, pts }) => `<tr>
-      <td title="${esc(p.meta.source_note || '')}">${esc(p.meta.label)}<span class="dir-mini">${p.direction === 'ascending' ? '↑' : '↓'}</span></td>
-      <td>${raw == null ? '<span class="muted">—</span>' : fmt(raw)}${p.meta.unit && raw != null ? ` <span class="muted">${esc(p.meta.unit)}</span>` : ''}</td>
-      <td>${score == null ? '<span class="muted">n/a</span>' : `${fmt(score, 1)}/${n}`}</td>
-      <td>${Math.round(p.weight / total * 100)}%</td>
-      <td><div class="pts-bar"><div style="width:${pts == null ? 0 : Math.max(2, pts)}%;background:${scoreColor(score == null ? null : (score - 1) / (n - 1) * 100)}"></div></div>${pts == null ? '' : pts.toFixed(1)}</td></tr>`).join('')}
+    <div class="unit-sub">PTI = Σ weight × z-score</div>
+    <table class="unit-table"><thead><tr><th>Indicator</th><th>Value</th><th>z</th><th>w</th><th>w × z</th></tr></thead><tbody>
+    ${terms.map(t => {
+      const m = S.ind.get(t.id), part = S.res.parts.find(p => p.id === t.id), raw = rawValue(part, T, r.i);
+      const via = t.via === 'native' ? '' : `<span class="via" title="${t.via === 'projected' ? 'Projected: the ' + esc(levelLabel(t.from)) + "'s z-score, normalised among " + esc(levelLabel(t.from).toLowerCase()) + ' units' : 'Mean of ' + esc(levelLabel(t.from).toLowerCase()) + ' z-scores'}">${esc(levelLabel(t.from))}</span>`;
+      const bar = t.term == null ? '' : `<div class="term-bar"><div class="${t.term >= 0 ? 'pos' : 'neg'}" style="width:${Math.abs(t.term) / maxAbs * 50}%;${t.term >= 0 ? 'left:50%' : `right:50%`}"></div></div>`;
+      return `<tr><td title="${esc(m.source_note || '')}">${esc(m.label)}${via}</td>
+        <td>${raw == null || !isNum(raw) ? '<span class="muted">—</span>' : fmt(raw)}${m.unit && isNum(raw) ? ` <span class="muted">${esc(m.unit)}</span>` : ''}</td>
+        <td>${t.z == null ? '<span class="muted">n/a</span>' : fmt(t.z, 2)}</td>
+        <td class="${t.weight > 0 ? 'wpos' : 'wneg'}">${t.weight > 0 ? '+' : ''}${t.weight}</td>
+        <td>${bar}${t.term == null ? '' : fmt(t.term, 2)}</td></tr>`;
+    }).join('')}
     </tbody></table>
-    <div class="muted small unit-foot">Points sum to the PTI score (0–100). Class ${n} = highest priority on that indicator.</div>`;
+    <div class="muted small unit-foot">z = how many standard deviations the value is from the mean of all ${esc((terms.length ? levelLabel(terms[0].from) : T.label).toLowerCase())}-level units it is normalised among.${S.res.excluded.length ? ` Not used at this level: ${esc(S.res.excluded.map(id => S.ind.get(id).label).join(', '))}.` : ''}</div>`;
   $('unit-panel').style.display = '';
 }
 function hideUnitPanel() { $('unit-panel').style.display = 'none'; }
 
-const badgeCss = cls => {
-  const k = (S.cfg.priority_labels || [1, 2, 3, 4, 5]).length;
-  return cls ? BADGE_CSS[Math.round((cls - 1) * 4 / Math.max(1, k - 1))] : '';
-};
 function fmt(v, d) {
   if (!isNum(v)) return '—';
-  if (d != null) return v.toFixed(d).replace(/\.0$/, '');
+  if (d != null) return (+v.toFixed(d)).toLocaleString(undefined, { maximumFractionDigits: d });
   const a = Math.abs(v);
-  return a >= 1000 ? Math.round(v).toLocaleString() : a >= 100 ? v.toFixed(0) : a >= 1 ? (+v.toFixed(2)).toString() : (+v.toPrecision(3)).toString();
-}
-function scoreColor(score, alpha = 1) {
-  if (score == null) return `rgba(200,200,200,${alpha})`;
-  const t = Math.max(0, Math.min(1, score / 100));
-  const stops = SCORE_SCALE.map(s => [s[0], parseInt(s[1].slice(1, 3), 16), parseInt(s[1].slice(3, 5), 16), parseInt(s[1].slice(5, 7), 16)]);
-  let k = 0; while (k < stops.length - 2 && t > stops[k + 1][0]) k++;
-  const [t0, r0, g0, b0] = stops[k], [t1, r1, g1, b1] = stops[k + 1], f = (t - t0) / (t1 - t0 || 1);
-  return `rgba(${Math.round(r0 + f * (r1 - r0))},${Math.round(g0 + f * (g1 - g0))},${Math.round(b0 + f * (b1 - b0))},${alpha})`;
+  return a >= 1000 ? Math.round(v).toLocaleString() : a >= 100 ? v.toFixed(0) : a >= 1 ? String(+v.toFixed(2)) : String(+v.toPrecision(3));
 }
 
 /* ── Table ───────────────────────────────────────────────── */
 function buildTable(rows) {
-  const L = S.levelByKey[S.level], isBase = L === S.base;
-  const parents = S.levels.slice(0, L.rank);
-  const hasCov = isBase && rows.some(r => r.coverage < 0.999);
-  const hasW = rows.some(r => r.weight != null && !isBase);
+  const T = S.levelByKey[S.level];
+  const parents = S.levels.slice(0, T.rank);
+  const hasPop = rows.some(r => r.population != null);
   const hasRob = rows.some(r => r.robust != null);
   const hasPf = rows.some(r => r.projects != null);
+  const cols = groupColors(S.groups.groups);
   const th = (k, t, tip = '') => `<th data-sort="${k}"${tip ? ` title="${esc(tip)}"` : ''}>${esc(t)}</th>`;
-  let head = th('rank', 'Rank') + th('name', L.label) + parents.map((p, k) => th(`p${k}`, p.label)).join('') +
-    th('score', 'PTI score') + th('cls', 'Priority', 'Relative group of this run — quantiles of the scores shown');
-  if (!isBase) head += th('count', `${S.base.label}s`);
-  if (hasW) head += th('weight', 'Population');
-  if (hasCov) head += th('coverage', 'Coverage', 'Share of the selected weight with data');
-  if (hasRob) head += th('robust', 'Robustness', 'Share of weight-perturbed runs in which the unit is in the top group');
+  let head = th('rank', 'Rank') + th('name', T.label) + parents.map((p, k) => th(`p${k}`, p.label)).join('') +
+    th('score', 'PTI score', 'Σ weight × z-score') + th('priority', 'Priority', 'Priority 1 = highest PTI group');
+  if (hasPop) head += th('population', 'Population');
+  if (hasRob) head += th('robust', 'Robustness', 'Share of random-weight runs with the unit in the top group');
   if (hasPf) head += th('projects', 'Projects');
+  head += th('missing', 'Missing data');
   const body = rows.slice(0, 3000).map(r => {
-    let t = `<tr data-code="${esc(r.code)}"><td class="muted"><b>${r.rank}</b></td><td>${esc(r.name ?? r.code)}</td>` +
+    let t = `<tr data-code="${esc(r.code)}"><td class="muted"><b>${r.rank ?? '—'}</b></td><td>${esc(r.name ?? r.code)}</td>` +
       parents.map((_, k) => `<td class="muted">${esc(r.parents?.[k] ?? '')}</td>`).join('') +
-      `<td><div class="score-cell"><div class="score-bar" style="width:${Math.round(r.score * 0.7)}px;background:${scoreColor(r.score)}"></div>
-        <span class="score-val">${r.score.toFixed(1)}</span></div></td>
-       <td><span class="need-badge ${badgeCss(r.cls)}">${esc(r.priority)}</span></td>`;
-    if (!isBase) t += `<td class="muted">${r.count}</td>`;
-    if (hasW) t += `<td class="muted">${r.weight != null ? Math.round(r.weight).toLocaleString() : '—'}</td>`;
-    if (hasCov) t += `<td class="muted">${Math.round(r.coverage * 100)}%</td>`;
+      `<td class="num">${r.score == null ? '<span class="muted">no data</span>' : fmt(r.score, 3)}</td>
+       <td>${r.priority ? `<span class="prio-badge" style="background:${cols[r.priority - 1]}">Priority ${r.priority}</span>` : '<span class="prio-badge nodata">No data</span>'}</td>`;
+    if (hasPop) t += `<td class="muted num">${r.population != null ? Math.round(r.population).toLocaleString() : '—'}</td>`;
     if (hasRob) t += `<td class="muted">${r.robust != null ? Math.round(r.robust * 100) + '%' : '—'}</td>`;
     if (hasPf) t += `<td class="muted">${r.projects ?? ''}</td>`;
+    t += `<td class="muted small">${esc(r.missing.map(id => S.ind.get(id).label).join(', '))}</td>`;
     return t + '</tr>';
   }).join('');
   const more = rows.length > 3000 ? `<div class="muted small table-more">Showing 3,000 of ${rows.length.toLocaleString()} — filter, or download the CSV.</div>` : '';
@@ -737,12 +678,12 @@ function buildTable(rows) {
 function filterRows() {
   const q = $('table-search').value.trim().toLowerCase();
   if (!q) return S.rows;
-  return S.rows.filter(r => [r.name, r.code, r.priority, ...(r.parents || [])].some(x => String(x ?? '').toLowerCase().includes(q)));
+  return S.rows.filter(r => [r.name, r.code, r.priority && `priority ${r.priority}`, ...(r.parents || [])].some(x => String(x ?? '').toLowerCase().includes(q)));
 }
 
 function sortBy(col) {
-  if (S.sortCol === col) S.sortAsc = !S.sortAsc; else { S.sortCol = col; S.sortAsc = col === 'name' || col === 'rank' || /^p\d+$/.test(col); }
-  const get = r => (/^p\d+$/.test(col) ? r.parents?.[+col.slice(1)] : r[col]);
+  if (S.sortCol === col) S.sortAsc = !S.sortAsc; else { S.sortCol = col; S.sortAsc = ['name', 'rank', 'priority'].includes(col) || /^p\d+$/.test(col); }
+  const get = r => (/^p\d+$/.test(col) ? r.parents?.[+col.slice(1)] : col === 'missing' ? r.missing.length : r[col]);
   S.rows.sort((a, b) => {
     const av = get(a), bv = get(b);
     if (av == null) return 1; if (bv == null) return -1;
@@ -752,150 +693,128 @@ function sortBy(col) {
   buildTable(filterRows());
 }
 
-/* ── Distribution & comparison ───────────────────────────── */
-function kde(values, xs, bw) {
-  const n = values.length, k = Math.sqrt(2 * Math.PI);
-  return xs.map(x => { let s = 0; for (const v of values) { const u = (x - v) / bw; s += Math.exp(-0.5 * u * u) / k; } return s / (n * bw); });
-}
-
+/* ── Distribution ────────────────────────────────────────── */
 function renderDistribution() {
   if (!S.run) return;
-  const v = S.rows.map(r => r.score);
-  if (!v.length) return;
-  const L = S.levelByKey[S.level];
-  const xs = Array.from({ length: 101 }, (_, i) => i), binW = 2;
-  const avg = v.reduce((a, b) => a + b, 0) / v.length;
-  const dens = kde(v, xs, 4).map(d => d * v.length * binW);
-  const traces = [
-    { type: 'histogram', x: v, xbins: { start: 0, end: 100, size: binW }, marker: { color: v.map(s => scoreColor(s, 0.75)) }, name: 'Current', opacity: 0.85 },
-    { type: 'scatter', mode: 'lines', x: xs, y: dens, line: { color: '#1e3a5f', width: 2 }, name: 'Density', hoverinfo: 'skip' },
-    { type: 'scatter', mode: 'lines', x: [avg, avg], y: [0, Math.max(...dens) * 1.05], line: { color: '#e74c3c', dash: 'dash', width: 1.5 }, name: `Mean ${avg.toFixed(1)}` },
-  ];
-  if (S.compare) {
-    const cv = compareValuesAtLevel(S.compare);
-    if (cv.length) {
-      const cd = kde(cv, xs, 4).map(d => d * cv.length * binW);
-      traces.push({ type: 'scatter', mode: 'lines', x: xs, y: cd, line: { color: '#94a3b8', width: 2, dash: 'dot' }, name: S.compare.name, hoverinfo: 'skip' });
-    }
-  }
+  const T = S.levelByKey[S.level], m = S.groups.groups, cols = groupColors(m);
+  const scored = S.rows.filter(r => r.score != null);
+  const traces = Array.from({ length: m }, (_, k) => {
+    const p = k + 1, v = scored.filter(r => r.priority === p).map(r => r.score);
+    return { type: 'histogram', x: v, name: `Priority ${p}`, marker: { color: cols[k] }, nbinsx: 40, opacity: 0.9 };
+  });
   Plotly.react('dist-hist-div', traces, {
-    xaxis: { title: 'PTI score', range: [0, 100], dtick: 10 }, yaxis: { title: `${L.label}s` },
-    title: { text: 'Score distribution', font: { size: 13 } }, legend: { x: 1, xanchor: 'right', y: 1 },
+    barmode: 'stack', xaxis: { title: 'PTI score (Σ weight × z)' }, yaxis: { title: `${T.label} units` },
+    title: { text: 'PTI distribution by priority group', font: { size: 13 } }, legend: { x: 1, xanchor: 'right', y: 1, font: { size: 10 } },
     margin: { t: 36, b: 44, l: 50, r: 20 }, height: 248, bargap: 0.05, plot_bgcolor: '#fff', paper_bgcolor: '#fff',
   }, { responsive: true, displayModeBar: false });
 
-  const top = S.levels[0];
-  const st = PTICore.aggregate(S.units, S.run.comp.index, top.code, top.name, S.weightField).sort((a, b) => a.mean - b.mean);
+  const hasPop = scored.some(r => r.population != null);
+  const by = Array.from({ length: m }, (_, k) => {
+    const g = scored.filter(r => r.priority === k + 1);
+    return { n: g.length, pop: g.reduce((s, r) => s + (r.population || 0), 0) };
+  });
+  const totPop = by.reduce((s, b) => s + b.pop, 0);
   Plotly.react('dist-bar-div', [{
-    type: 'bar', orientation: 'h', x: st.map(s => s.mean), y: st.map(s => s.name),
-    marker: { color: st.map(s => scoreColor(s.mean)) }, text: st.map(s => s.mean.toFixed(1)), textposition: 'outside',
-    hovertemplate: '%{y}: %{x:.1f}<extra></extra>',
+    type: 'bar', x: by.map((_, k) => `Priority ${k + 1}`), y: hasPop ? by.map(b => b.pop / totPop * 100) : by.map(b => b.n),
+    marker: { color: cols }, text: by.map(b => `${b.n} units`), textposition: 'auto',
+    hovertemplate: hasPop ? '%{x}: %{y:.1f}% of population<extra></extra>' : '%{x}: %{y} units<extra></extra>',
   }], {
-    xaxis: { title: S.weightField ? 'Population-weighted mean PTI' : 'Mean PTI', range: [0, 108] }, yaxis: { automargin: true },
-    title: { text: `By ${top.label}`, font: { size: 13 } }, margin: { t: 36, b: 44, l: 10, r: 50 },
-    height: Math.max(248, st.length * 22), plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+    yaxis: { title: hasPop ? '% of population' : 'units' }, title: { text: hasPop ? 'Population by priority group' : 'Units by priority group', font: { size: 13 } },
+    margin: { t: 36, b: 44, l: 50, r: 20 }, height: 248, plot_bgcolor: '#fff', paper_bgcolor: '#fff',
   }, { responsive: true, displayModeBar: false });
 }
 
-function compareValuesAtLevel(run) {
-  const L = S.levelByKey[S.level];
-  if (L === S.base) return run.scores.filter(isNum);
-  return PTICore.aggregate(S.units, run.scores, L.code, L.name, S.weightField).map(r => r.mean);
-}
-
+/* ── Sensitivity: compare schemes, random weights ────────── */
 function saveRun() {
   if (!S.run) return;
-  const def = `${S.run.scenarioLabel || 'Custom'} · ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-  const name = prompt('Name this saved run:', def);
+  const def = `${S.run.schemeLabel || 'Custom'} · ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+  const name = prompt('Name these weights:', def);
   if (!name || !name.trim()) return;
-  S.savedRuns.push({ name: name.trim(), date: new Date().toISOString(),
-    weights: Object.fromEntries(S.run.parts.map(p => [p.id, p.weight])),
-    scores: S.run.comp.index.map(s => (s == null ? null : +s.toFixed(2))) });
-  if (S.savedRuns.length > 10) S.savedRuns.shift();
-  try { localStorage.setItem(runsKey(), JSON.stringify(S.savedRuns)); } catch (_) { alert('Could not store the run in this browser (storage full or blocked).'); }
-  updateSavedRunsUI();
+  S.savedRuns.push({ name: name.trim(), date: new Date().toISOString(), weights: S.run.weights });
+  if (S.savedRuns.length > 20) S.savedRuns.shift();
+  try { localStorage.setItem(runsKey(), JSON.stringify(S.savedRuns)); } catch (_) { alert('Could not store the weights in this browser.'); }
+  updateCompareSelect();
 }
 
-function updateSavedRunsUI() {
+function updateCompareSelect() {
   const sel = $('compare-select'), cur = sel.value;
-  sel.innerHTML = '<option value="">— none —</option>' + S.savedRuns.map((r, i) => `<option value="${i}">${esc(r.name)}</option>`).join('');
-  if (cur && S.savedRuns[+cur]) sel.value = cur;
-  $('compare-bar').style.display = S.savedRuns.length ? 'flex' : 'none';
+  const sc = (S.cfg?.scenarios || []).map(s => `<option value="s:${esc(s.id)}">${esc(s.label)}</option>`).join('');
+  const sv = S.savedRuns.map((r, i) => `<option value="r:${i}">${esc(r.name)} (saved)</option>`).join('');
+  sel.innerHTML = `<option value="">— pick a scheme or saved run —</option>${sc ? `<optgroup label="Schemes">${sc}</optgroup>` : ''}${sv ? `<optgroup label="Saved">${sv}</optgroup>` : ''}`;
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
 }
 
-/* Sensitivity between two runs: rank agreement and top-group overlap */
-function onCompareSelect() {
-  const i = $('compare-select').value;
-  S.compare = i !== '' ? S.savedRuns[+i] : null;
-  $('compare-clear').style.display = S.compare ? '' : 'none';
-  $('compare-stats').textContent = '';
-  if (S.compare && S.run) {
-    const a = S.run.comp.index, b = S.compare.scores;
-    if (b.length !== a.length) { $('compare-stats').textContent = 'saved with different data — not comparable'; }
-    else {
-      const rho = PTICore.spearman(a, b);
-      const ta = PTICore.topSet(a, 0.2), tb = PTICore.topSet(b, 0.2);
-      let both = 0; for (const x of ta) if (tb.has(x)) both++;
-      $('compare-stats').textContent = `rank correlation ${rho == null ? '—' : rho.toFixed(2)} · top 20% overlap ${Math.round(both / Math.max(1, ta.size) * 100)}% (${S.base.label.toLowerCase()} level)`;
-    }
-  }
-  if (S.run) renderDistribution();
+/* Rank correlation and Priority 1 overlap with another set of weights */
+function onCompare() {
+  const v = $('compare-select').value, out = $('compare-stats');
+  if (!v || !S.run) { out.textContent = ''; return; }
+  const w = v.startsWith('s:') ? (S.cfg.scenarios.find(s => s.id === v.slice(2)) || {}).weights : S.savedRuns[+v.slice(2)]?.weights;
+  if (!w) return;
+  const other = PTICore.computePTI(S.model, S.level, w, opts());
+  const g2 = PTICore.priorityGroups(other.score, S.bins);
+  const rho = PTICore.spearman(S.res.score, other.score);
+  const a = new Set(), b = new Set();
+  S.groups.priority.forEach((p, i) => { if (p === 1) a.add(i); });
+  g2.priority.forEach((p, i) => { if (p === 1) b.add(i); });
+  let both = 0; for (const i of a) if (b.has(i)) both++;
+  let moved = 0; S.groups.priority.forEach((p, i) => { if (p != null && g2.priority[i] != null && p !== g2.priority[i]) moved++; });
+  out.innerHTML = `Spearman <b>${rho == null ? '—' : rho.toFixed(2)}</b> · Priority 1 overlap <b>${a.size ? Math.round(both / a.size * 100) : 0}%</b> (${both} of ${a.size}) · ${moved.toLocaleString()} units change group`;
 }
 
-/* ── Robustness ──────────────────────────────────────────── */
 function runRobustness() {
   if (!S.run) return alert('Run the PTI first.');
-  const L = S.levelByKey[S.level];
-  const spread = +$('rob-spread').value, top = +$('rob-top').value;
+  const T = S.levelByKey[S.level];
   $('robust-body').innerHTML = '<div class="muted panel-empty">Running 200 weight draws…</div>';
   setTimeout(() => {
-    const grouper = L === S.base ? null : PTICore.makeGrouper(S.units, L.code, S.weightField);
-    const res = PTICore.robustness(S.run.parts, S.run.nClasses, S.run.minCoverage, { draws: 200, spread, topShare: top, grouper });
-    const codes = grouper ? grouper.codes : S.units.map(u => u[L.code]);
-    res.byCode = new Map(codes.map((c, i) => [c, res.freq[i]]));
-    S.robust = res;
-    $('mapvar-list').querySelector('input[value=robust]').disabled = false;
-    $('mapvar-list').querySelector('input[value=robust]').parentElement.lastChild.textContent = ' Robustness (share of draws in top group)';
+    S.robust = PTICore.robustness(S.res.parts, T.rows.length,
+      { draws: 200, spread: +$('rob-spread').value, topShare: +$('rob-top').value, naRm: opts().naRm });
+    const rb = document.querySelector('input[name=mapvar][value=robust]');
+    rb.disabled = false; rb.nextElementSibling.textContent = 'Robustness (share of draws in top group)';
     renderAll();
     renderRobustPanel();
   }, 20);
 }
 
 function renderRobustPanel() {
-  const r = S.robust, L = S.levelByKey[S.level];
-  const always = S.rows.filter(x => x.robust >= 0.8).length, never = S.rows.filter(x => x.robust === 0).length;
+  const r = S.robust, T = S.levelByKey[S.level];
+  const always = S.rows.filter(x => x.robust >= 0.8).length;
   const unstable = S.rows.filter(x => x.robust > 0.2 && x.robust < 0.8).sort((a, b) => b.score - a.score);
   $('robust-body').innerHTML = `
     <div class="kpi-row">
-      <div class="kpi"><b>${r.spearman ? r.spearman.mean.toFixed(2) : '—'}</b><span>mean rank correlation with the baseline${r.spearman ? ` (min ${r.spearman.min.toFixed(2)})` : ''}</span></div>
-      <div class="kpi"><b>${r.stableShare == null ? '—' : Math.round(r.stableShare * 100) + '%'}</b><span>of the baseline top ${Math.round(r.topShare * 100)}% stay there in ≥80% of draws</span></div>
-      <div class="kpi"><b>${always.toLocaleString()}</b><span>${esc(L.label.toLowerCase())}s robustly in the top group</span></div>
-      <div class="kpi"><b>${unstable.length.toLocaleString()}</b><span>borderline (in the top group in 20–80% of draws)</span></div>
+      <div class="kpi"><b>${r.spearman ? r.spearman.mean.toFixed(2) : '—'}</b><span>mean rank correlation with these weights${r.spearman ? ` (min ${r.spearman.min.toFixed(2)})` : ''}</span></div>
+      <div class="kpi"><b>${r.stableShare == null ? '—' : Math.round(r.stableShare * 100) + '%'}</b><span>of the top ${Math.round(r.topShare * 100)}% stay there in ≥80% of draws</span></div>
+      <div class="kpi"><b>${always.toLocaleString()}</b><span>${esc(T.label.toLowerCase())} units robustly in the top group</span></div>
+      <div class="kpi"><b>${unstable.length.toLocaleString()}</b><span>borderline — in the top group in 20–80% of draws</span></div>
     </div>
     <div class="robust-split">
       <div id="robust-hist"></div>
-      <div class="robust-list"><div class="unit-sub">Borderline ${esc(L.label.toLowerCase())}s — their priority depends on the weights</div>
-        ${unstable.slice(0, 40).map(x => `<div class="rl-row" data-code="${esc(x.code)}"><span>${esc(x.name ?? x.code)}</span><span class="muted">${x.score.toFixed(1)} · ${Math.round(x.robust * 100)}%</span></div>`).join('') || '<div class="muted small">None — the top group is stable.</div>'}
+      <div class="robust-list"><div class="unit-sub">Borderline — their priority depends on the weights</div>
+        ${unstable.slice(0, 40).map(x => `<div class="rl-row" data-code="${esc(x.code)}"><span>${esc(x.name ?? x.code)}</span><span class="muted">${fmt(x.score, 2)} · ${Math.round(x.robust * 100)}%</span></div>`).join('') || '<div class="muted small">None — the top group is stable.</div>'}
       </div>
     </div>
-    <div class="muted small panel-foot">${r.draws} draws, each weight multiplied by a random factor in [${(1 - r.spread).toFixed(2)}, ${(1 + r.spread).toFixed(2)}] and renormalised. Indicator classes are held fixed. ${never.toLocaleString()} ${esc(L.label.toLowerCase())}s never reach the top group.</div>`;
+    <div class="muted small panel-foot">${r.draws} draws, each weight multiplied by a random factor in [${(1 - r.spread).toFixed(2)}, ${(1 + r.spread).toFixed(2)}]; signs and z-scores held fixed. Few or loosely correlated indicators make rankings more sensitive to weights.</div>`;
   $('robust-body').querySelectorAll('.rl-row').forEach(el => el.addEventListener('click', () => showUnitPanel(el.dataset.code)));
   const f = S.rows.map(x => x.robust).filter(isNum).map(x => x * 100);
   Plotly.newPlot('robust-hist', [{ type: 'histogram', x: f, xbins: { start: 0, end: 100.01, size: 5 }, marker: { color: '#3b82f6' } }], {
-    xaxis: { title: `% of draws in the top ${Math.round(r.topShare * 100)}%`, range: [0, 100] }, yaxis: { title: `${L.label}s` },
-    margin: { t: 10, b: 40, l: 50, r: 10 }, height: 180, plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+    xaxis: { title: `% of draws in the top ${Math.round(r.topShare * 100)}%`, range: [0, 100] }, yaxis: { title: `${T.label} units` },
+    margin: { t: 10, b: 40, l: 50, r: 10 }, height: 170, plot_bgcolor: '#fff', paper_bgcolor: '#fff',
   }, { responsive: true, displayModeBar: false });
 }
 
 function resetMapVar() {
-  S.mapVar = 'pti';
+  if (S.mapVar === 'robust') { S.mapVar = 'priority'; document.querySelector('input[name=mapvar][value=priority]').checked = true; }
   const rb = document.querySelector('input[name=mapvar][value=robust]');
-  if (rb) { rb.disabled = true; rb.parentElement.lastChild.textContent = ' Robustness (run it first)'; }
-  const pt = document.querySelector('input[name=mapvar][value=pti]'); if (pt) pt.checked = true;
-  if ($('robust-body') && !S.robust) $('robust-body').innerHTML = '<div class="muted panel-empty">Run the robustness test for the current settings.</div>';
+  if (rb) { rb.disabled = true; rb.nextElementSibling.textContent = 'Robustness (run it first)'; }
+  if ($('robust-body')) $('robust-body').innerHTML = '<div class="muted panel-empty">Run the random-weights test for the current weights and level.</div>';
 }
 
-/* ── Layers ──────────────────────────────────────────────── */
+/* ── Layers & data explorer ──────────────────────────────── */
+function buildExplorerSelect() {
+  const list = [...S.ind.values()].filter(m => m.explorer !== false);
+  $('explorer-select').innerHTML = list.map(m => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
+  S.explorerId = list[0]?.id || null;
+}
+
 function buildLayersPanel() {
   const ovs = S.cfg.overlays || [];
   $('layers-list').innerHTML = ovs.length ? ovs.map(o => `<label class="lyr-row">
@@ -905,7 +824,7 @@ function buildLayersPanel() {
   $('layers-list').querySelectorAll('input[data-ov]').forEach(cb => cb.addEventListener('change', async () => {
     const id = cb.dataset.ov;
     if (cb.checked) { await loadOverlay(id); S.overlayOn.add(id); } else S.overlayOn.delete(id);
-    if (S.run) renderMap(); else if (S.mapRendered || S.geo[S.levels[0].key]) drawOverlaysOnly();
+    if (S.run || S.mapVar === 'indicator') renderMap(); else drawBaseMap();
   }));
 }
 
@@ -916,52 +835,28 @@ async function loadOverlay(id) {
   return S.overlayGeo[id];
 }
 
-function drawOverlaysOnly() {
-  const { under, labels } = baseLayers(), ov = overlayLayersAndTraces();
-  Plotly.react('map-plotly', [{ type: 'scattermap', lat: [], lon: [] }, ...ov.traces],
-    { map: { style: 'white-bg', layers: [...under, ...ov.layers, ...labels], ...mapView() }, margin: { t: 0, b: 0, l: 0, r: 0 }, uirevision: S.cfg.id, showlegend: false },
-    { responsive: true, displayModeBar: false });
-  $('map-empty').classList.add('hidden');
-}
-
 /* ── Portfolio balance ───────────────────────────────────── */
 async function ensurePortfolio() {
-  const ov = S.portfolioLayer();
+  const ov = portfolioLayer();
   if (!ov) return null;
   if (S.portfolio) return S.portfolio;
   const gj = await loadOverlay(ov.id);
-  const unitOf = new Map(S.units.map((u, i) => [String(u[S.base.code]), i]));
-  const perUnit = new Float64Array(S.units.length);
-  let outside = 0, located = 0;
+  const B = S.levels[S.levels.length - 1];
+  const units = [];
+  let outside = 0;
   for (const f of gj.features) {
-    let i = f.properties?._unit != null ? unitOf.get(String(f.properties._unit)) : undefined;
-    if (i === undefined && f.geometry?.type === 'Point') i = locatePoint(f.geometry.coordinates);
-    if (i === undefined || i === null) { outside++; continue; }
-    perUnit[i]++; located++;
+    const i = f.properties?._unit != null ? B.index.get(String(f.properties._unit)) : undefined;
+    if (i === undefined) { outside++; continue; }
+    units.push(i);
   }
-  S.portfolio = { ov, perUnit, outside, located };
+  S.portfolio = { ov, baseIdx: units, outside, located: units.length };
   return S.portfolio;
 }
 
-/* Point-in-polygon fallback for portfolios not tagged by the build */
-function locatePoint([x, y]) {
-  const gj = S.geo[S.base.key];
-  if (!gj) return null;
-  const inRing = r => { let c = false; for (let i = 0, j = r.length - 1; i < r.length; j = i++) { const [xi, yi] = r[i], [xj, yj] = r[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; };
-  const inPoly = p => inRing(p[0]) && !p.slice(1).some(inRing);
-  const unitOf = new Map(S.units.map((u, i) => [String(u[S.base.code]), i]));
-  for (const f of gj.features) {
-    const g = f.geometry; if (!g) continue;
-    const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : [];
-    if (polys.some(inPoly)) return unitOf.get(String(f.properties[S.base.code])) ?? null;
-  }
-  return null;
-}
-
 function attachPortfolio() {
-  const pf = S.portfolio, L = S.levelByKey[S.level];
+  const B = S.levels[S.levels.length - 1], T = S.levelByKey[S.level];
   const counts = new Map();
-  S.units.forEach((u, i) => { if (pf.perUnit[i]) counts.set(String(u[L.code]), (counts.get(String(u[L.code])) || 0) + pf.perUnit[i]); });
+  for (const i of S.portfolio.baseIdx) { const c = String(B.rows[i][T.code]); counts.set(c, (counts.get(c) || 0) + 1); }
   S.rows.forEach(r => { r.projects = counts.get(String(r.code)) || 0; });
 }
 
@@ -971,41 +866,39 @@ async function renderPortfolio() {
   const pf = await ensurePortfolio();
   if (!pf) return;
   attachPortfolio(); buildTable(filterRows());
-  const L = S.levelByKey[S.level], labels = S.cfg.priority_labels || ['Very low', 'Low', 'Moderate', 'High', 'Very high'];
-  const k = labels.length;
-  const byCls = Array.from({ length: k }, () => ({ units: 0, pop: 0, proj: 0, withProj: 0 }));
-  let popTot = 0, projTot = 0;
+  const T = S.levelByKey[S.level], m = S.groups.groups, cols = groupColors(m);
+  const hasPop = S.rows.some(r => r.population != null);
+  const by = Array.from({ length: m }, () => ({ base: 0, proj: 0 }));
+  let tb = 0, tp = 0;
   for (const r of S.rows) {
-    if (!r.cls) continue;
-    const b = byCls[r.cls - 1], pop = r.weight ?? (r.count || 1);
-    b.units++; b.pop += pop; b.proj += r.projects; if (r.projects) b.withProj++;
-    popTot += pop; projTot += r.projects;
+    if (!r.priority) continue;
+    const b = by[r.priority - 1], x = hasPop ? (r.population || 0) : 1;
+    b.base += x; b.proj += r.projects; tb += x; tp += r.projects;
   }
-  const popLabel = S.weightField ? 'population' : `${S.base.label.toLowerCase()}s`;
-  const gaps = S.rows.filter(r => r.cls === k && !r.projects).sort((a, b) => b.score - a.score);
-  const lowShare = projTot ? (byCls[0].proj + (k > 1 ? byCls[1].proj : 0)) / projTot : 0;
-  const topShare = projTot ? byCls[k - 1].proj / projTot : 0;
+  const gaps = S.rows.filter(r => r.priority === 1 && !r.projects).sort((a, b) => b.score - a.score);
+  const lbl = hasPop ? 'population' : `${T.label.toLowerCase()} units`;
   body.innerHTML = `
     <div class="kpi-row">
       <div class="kpi"><b>${pf.located}</b><span>${esc(pf.ov.label)} located${pf.outside ? ` (${pf.outside} outside the study area)` : ''}</span></div>
-      <div class="kpi"><b>${Math.round(topShare * 100)}%</b><span>of projects in "${esc(labels[k - 1])}" ${esc(L.label.toLowerCase())}s, which hold ${popTot ? Math.round(byCls[k - 1].pop / popTot * 100) : 0}% of ${popLabel}</span></div>
-      <div class="kpi"><b>${Math.round(lowShare * 100)}%</b><span>of projects in the two lowest-priority groups</span></div>
-      <div class="kpi"><b>${gaps.length.toLocaleString()}</b><span>"${esc(labels[k - 1])}" ${esc(L.label.toLowerCase())}s with no project</span></div>
+      <div class="kpi"><b>${tp ? Math.round(by[0].proj / tp * 100) : 0}%</b><span>of projects in Priority 1 ${esc(T.label.toLowerCase())} units, which hold ${tb ? Math.round(by[0].base / tb * 100) : 0}% of ${lbl}</span></div>
+      <div class="kpi"><b>${tp ? Math.round(by.slice(Math.max(1, m - 2)).reduce((s, b) => s + b.proj, 0) / tp * 100) : 0}%</b><span>of projects in the two lowest-priority groups</span></div>
+      <div class="kpi"><b>${gaps.length.toLocaleString()}</b><span>Priority 1 ${esc(T.label.toLowerCase())} units with no project</span></div>
     </div>
     <div class="robust-split">
       <div id="portfolio-chart"></div>
-      <div class="robust-list"><div class="unit-sub">Gaps — highest-priority ${esc(L.label.toLowerCase())}s without a project</div>
-        ${gaps.slice(0, 40).map(x => `<div class="rl-row" data-code="${esc(x.code)}"><span>${esc(x.name ?? x.code)}</span><span class="muted">${x.score.toFixed(1)}</span></div>`).join('') || '<div class="muted small">None.</div>'}
+      <div class="robust-list"><div class="unit-sub">Priority 1 without a project</div>
+        ${gaps.slice(0, 40).map(x => `<div class="rl-row" data-code="${esc(x.code)}"><span>${esc(x.name ?? x.code)}</span><span class="muted">${fmt(x.score, 2)}</span></div>`).join('') || '<div class="muted small">None.</div>'}
       </div>
     </div>
-    <div class="muted small panel-foot">Priority groups are relative to this run. A gap is a prompt for discussion, not a siting decision — check operational and political-economy constraints.</div>`;
+    <div class="muted small panel-foot">Project sites should not be chosen on the PTI alone — complement it with field knowledge and record site-level challenges.</div>`;
   body.querySelectorAll('.rl-row').forEach(el => el.addEventListener('click', () => showUnitPanel(el.dataset.code)));
+  const xs = by.map((_, k) => `Priority ${k + 1}`);
   Plotly.newPlot('portfolio-chart', [
-    { type: 'bar', name: `Share of ${popLabel}`, x: labels, y: byCls.map(b => (popTot ? b.pop / popTot * 100 : 0)), marker: { color: '#cbd5e1' } },
-    { type: 'bar', name: 'Share of projects', x: labels, y: byCls.map(b => (projTot ? b.proj / projTot * 100 : 0)), marker: { color: pf.ov.color || '#1e3a8a' } },
+    { type: 'bar', name: `Share of ${lbl}`, x: xs, y: by.map(b => (tb ? b.base / tb * 100 : 0)), marker: { color: '#cbd5e1' } },
+    { type: 'bar', name: 'Share of projects', x: xs, y: by.map(b => (tp ? b.proj / tp * 100 : 0)), marker: { color: cols } },
   ], {
-    barmode: 'group', yaxis: { title: '%', rangemode: 'tozero' }, xaxis: { title: `Priority group (${L.label.toLowerCase()} level)` },
-    legend: { orientation: 'h', y: 1.15 }, margin: { t: 20, b: 44, l: 44, r: 10 }, height: 200, plot_bgcolor: '#fff', paper_bgcolor: '#fff',
+    barmode: 'group', yaxis: { title: '%', rangemode: 'tozero' }, legend: { orientation: 'h', y: 1.15 },
+    margin: { t: 20, b: 40, l: 44, r: 10 }, height: 200, plot_bgcolor: '#fff', paper_bgcolor: '#fff',
   }, { responsive: true, displayModeBar: false });
 }
 
@@ -1023,24 +916,24 @@ function clearAOI() {
   if (S.mapRendered) Plotly.restyle('map-plotly', { selectedpoints: [null] }, [0]);
 }
 function onAOISelected(ev) {
+  if (!S.run) return;
   const pts = (ev?.points || []).filter(p => p.curveNumber === 0);
   const sel = pts.map(p => S.rows.find(r => String(r.code) === String(S.mapIds[p.pointIndex]))).filter(Boolean);
   if (!sel.length) return;
-  const v = sel.map(r => r.score).sort((a, b) => a - b), n = v.length;
-  const mean = v.reduce((a, b) => a + b, 0) / n;
-  const k = (S.cfg.priority_labels || [1, 2, 3, 4, 5]).length;
-  const hi = sel.filter(r => r.cls >= k - 1).length;
-  const pop = sel.reduce((s, r) => s + (r.weight || 0), 0);
+  const sc = sel.filter(r => r.score != null), v = sc.map(r => r.score).sort((a, b) => a - b), n = v.length;
+  const p1 = sel.filter(r => r.priority === 1).length;
+  const pop = sel.reduce((s, r) => s + (r.population || 0), 0);
   $('aoi-clear-btn').style.display = '';
-  $('aoi-title').textContent = `${n.toLocaleString()} ${S.levelByKey[S.level].label.toLowerCase()}s selected`;
+  $('aoi-title').textContent = `${sel.length.toLocaleString()} ${S.levelByKey[S.level].label.toLowerCase()} units selected`;
   $('aoi-stats').innerHTML = `<div class="aoi-grid">
-    <span>Mean PTI</span><b>${mean.toFixed(1)}</b>
-    <span>P25 – P75</span><b>${v[Math.floor(n * 0.25)].toFixed(1)} – ${v[Math.floor(n * 0.75)].toFixed(1)}</b>
-    <span>Top two groups</span><b>${Math.round(hi / n * 100)}%</b>
+    ${n ? `<span>Mean PTI</span><b>${fmt(v.reduce((a, b) => a + b, 0) / n, 2)}</b>
+    <span>Median</span><b>${fmt(v[Math.floor(n / 2)], 2)}</b>` : ''}
+    <span>Priority 1</span><b>${Math.round(p1 / sel.length * 100)}%</b>
     ${pop ? `<span>Population</span><b>${Math.round(pop).toLocaleString()}</b>` : ''}
     ${sel[0].projects != null ? `<span>Projects</span><b>${sel.reduce((s, r) => s + (r.projects || 0), 0)}</b>` : ''}</div>`;
-  Plotly.newPlot('aoi-hist', [{ type: 'histogram', x: v, xbins: { start: 0, end: 100, size: 5 }, marker: { color: v.map(s => scoreColor(s, 0.8)) } }],
-    { margin: { t: 4, b: 26, l: 28, r: 4 }, height: 100, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', xaxis: { range: [0, 100], dtick: 20, tickfont: { size: 9 } }, yaxis: { tickfont: { size: 9 } } },
+  const m = S.groups.groups, cols = groupColors(m);
+  Plotly.newPlot('aoi-hist', [{ type: 'bar', x: cols.map((_, k) => `P${k + 1}`), y: cols.map((_, k) => sel.filter(r => r.priority === k + 1).length), marker: { color: cols } }],
+    { margin: { t: 4, b: 22, l: 28, r: 4 }, height: 100, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', xaxis: { tickfont: { size: 9 } }, yaxis: { tickfont: { size: 9 } } },
     { displayModeBar: false, responsive: true });
   $('aoi-panel').style.display = '';
 }
@@ -1053,48 +946,56 @@ function closeDrawer() { $('results-drawer').className = 'drawer-closed'; S.draw
 /* ── About / data dictionary ─────────────────────────────── */
 function dictionaryRows() {
   return [...S.ind.values()].map(m => ({
-    id: m.id, label: m.label, category: m.category || '', level: levelOf(m.id).label, direction: m.direction,
+    id: m.id, label: m.label, pillar: m.pillar || '', levels: m.levels.map(levelLabel).join(', '),
+    prepared: Object.entries(m.provenance || {}).map(([k, v]) => `${levelLabel(k)}: ${v}`).join('; '),
     unit: m.unit || '', source: m.source_note || '', year: m.year ?? '',
-    fill: m.fill ?? 'none', scoring: m.scoring ? m.scoring.type : `${S.cfg.classification || 'quantile'} classes`,
+    filled: Object.entries(m.filled || {}).map(([k, n]) => `${n} at ${levelLabel(k)} (${m.fill})`).join('; '),
+    in_pti: m.pti === false ? 'no (explorer only)' : 'yes',
+    higher_is: m.higher_is_worse == null ? '' : m.higher_is_worse ? 'worse' : 'better',
   }));
 }
 
 function showAbout() {
   if (!S.cfg) return;
-  const c = S.cfg, n = S.nClasses;
-  const sc = (c.scenarios || []).map(s => `<li><b>${esc(s.label)}</b>${s.description ? ` — ${esc(s.description)}` : ''}</li>`).join('');
+  const c = S.cfg;
+  const sc = (c.scenarios || []).map(s => `<li><b>${esc(s.label)}</b>${s.description ? ` — ${esc(s.description)}` : ''}<br><span class="muted small">${
+    Object.entries(s.weights).map(([id, w]) => `${esc(S.ind.get(id)?.label || id)} ${w > 0 ? '+' : ''}${w}`).join(' · ')}</span></li>`).join('');
   const dict = dictionaryRows();
   $('about-body').innerHTML = `
-    <p class="about-lead">The Project Targeting Index combines several spatial indicators into one relative index of where conditions
-    align with a programme's objectives. It supports discussion of where to look more closely; it does not decide where projects go.</p>
-    <h4>How the score is built</h4>
+    <p class="about-lead">The Project Targeting Index (PTI) combines development indicators into one composite index to inform
+    geographic targeting, following the World Bank's <a href="https://worldbank.github.io/devPTIpack/articles/methodology.html" target="_blank" rel="noopener">devPTIpack methodology</a>.
+    It is a tool for evidence-based discussion; site selection should also draw on field knowledge.</p>
+    <h4>How the index is built</h4>
     <ol class="about-steps">
-      <li><b>Categorise.</b> Each indicator is split into ${n} classes — by quantile (equal number of units per class), equal interval,
-        or natural breaks — at the level it was measured, so a district-level figure is classed across districts, not across every
-        ${esc(S.base.label.toLowerCase())} in them. Some indicators use fixed thresholds or category scores set in the configuration.</li>
-      <li><b>Score.</b> Classes are scored 1 to ${n}. <i>Ascending</i> (↑): a higher value scores higher; <i>descending</i> (↓): lower.
-        Negative values are fine.</li>
-      <li><b>Weight and combine.</b> Weights sum to 100%. The weighted mean score is rescaled to 0–100: 0 = lowest class on every
-        indicator, 100 = highest. Units missing more than ${Math.round((1 - (c.min_coverage ?? 1)) * 100)}% of the selected weight are left unscored.</li>
-      <li><b>Aggregate.</b> Coarser levels average their ${esc(S.base.label.toLowerCase())}s${c.population_field ? ', weighted by population if chosen' : ''}.
-        Priority groups are quantiles of the scores shown — relative to the run, not absolute thresholds.</li>
+      <li><b>Normalise.</b> Each indicator is converted to a z-score, (value − mean) / standard deviation, among the units of each
+        spatial level separately — districts are compared with districts, regions with regions.</li>
+      <li><b>Project.</b> At a level where an indicator is not available, each unit takes the z-score of the coarser unit it lies in,
+        as normalised at that coarser level.${c.cross_level === 'devptipack_code'
+          ? ' This dataset also averages finer-level z-scores up to coarser units where an indicator is only available finer (as the devPTIpack R code does).'
+          : ' Finer-level data is not aggregated upward; coarser-level values are prepared in advance where needed.'}</li>
+      <li><b>Weight and sum.</b> PTI = Σ weight × z-score. A positive weight means higher values raise priority; a negative weight
+        means they lower it. A weight of 2 counts twice as much as a weight of 1.</li>
+      <li><b>Group.</b> Units are ranked and split into ${S.bins} equal-size groups (quantiles). Priority 1 is the highest PTI.
+        ${c.missing === 'ignore' ? 'Units missing an indicator are scored on the indicators they have.' : 'Units missing any selected indicator get no score and no priority.'}</li>
     </ol>
-    ${sc ? `<h4>Thematic PTIs</h4><ul class="about-list">${sc}</ul>` : ''}
+    <h4>Choosing weights</h4>
+    <p>Weights are agreed by consensus: experiment with combinations, check how sensitive the ranking is (Sensitivity tab: scheme
+    comparison and random weights), then settle on weights with the project team and government counterparts. A ranking is robust
+    when the top-priority areas stay largely the same under reasonable changes in weights. Rankings are most sensitive when few, or
+    loosely correlated, indicators are used.</p>
+    ${sc ? `<h4>Weighting schemes</h4><ul class="about-list">${sc}</ul>` : ''}
     <h4>Data dictionary <button class="dl-btn" id="dl-dict" style="margin-left:8px">↓ CSV</button></h4>
     <div class="about-table-wrap"><table class="r-table about-table"><thead><tr>
-      <th>Indicator</th><th>Category</th><th>Level</th><th>Dir.</th><th>Unit</th><th>Source</th><th>Year</th><th>Missing values</th><th>Scoring</th>
-    </tr></thead><tbody>${dict.map(d => `<tr><td>${esc(d.label)}</td><td>${esc(d.category)}</td><td>${esc(d.level)}</td>
-      <td>${d.direction === 'descending' ? '↓' : '↑'}</td><td>${esc(d.unit)}</td><td>${esc(d.source)}</td><td>${esc(d.year)}</td>
-      <td>${esc(d.fill)}</td><td>${esc(d.scoring)}</td></tr>`).join('')}</tbody></table></div>
-    <h4>Using the results responsibly</h4>
-    <ul class="about-list">
-      <li>Describe the output as a composite index conditional on the selected indicators and weights — not as who is "more deserving".</li>
-      <li>Test sensitivity: compare saved runs and use the Robustness tab before relying on a ranking.</li>
-      <li>Political-economy and operational constraints with a spatial dimension can be added as indicators; the rest still need to be weighed outside the tool.</li>
-      <li>Cite the indicator sources and dates above, and the run notes (↓ Run notes) for any figure you share.</li>
-    </ul>
+      <th>Indicator</th><th>Pillar</th><th>Levels</th><th>How each level was prepared</th><th>Unit</th><th>Source</th><th>Year</th><th>Filled</th>
+    </tr></thead><tbody>${dict.map(d => `<tr><td>${esc(d.label)}${d.in_pti !== 'yes' ? ' <span class="muted">(explorer only)</span>' : ''}</td><td>${esc(d.pillar)}</td><td>${esc(d.levels)}</td>
+      <td class="small">${esc(d.prepared)}</td><td>${esc(d.unit)}</td><td class="small">${esc(d.source)}</td><td>${esc(d.year)}</td><td class="small">${esc(d.filled)}</td></tr>`).join('')}</tbody></table></div>
+    <h4>Keeping it current</h4>
+    <p>Revisit indicators and weights as conditions and objectives change, and document site-level implementation challenges so
+    future targeting draws on both the index and operational experience.</p>
     ${c.about?.disclaimer ? `<p class="about-disclaimer">${esc(c.about.disclaimer)}</p>` : ''}
-    <p class="muted small">Dataset built ${esc(c.built || '')}${c.about?.contact ? ` · Contact: ${esc(c.about.contact)}` : ''}</p>`;
+    <p class="muted small">References: Finn &amp; Masaki (2020), <i>Subnational Targeting of Project Sites Using Project Targeting Index (PTI)</i>,
+    Poverty and Equity Notes No. 33, World Bank · Masaki et al. (2022), <i>Dashboards for development</i>, Poverty and Equity Notes No. 47.
+    · Dataset built ${esc(c.built || '')}${c.about?.contact ? ` · Contact: ${esc(c.about.contact)}` : ''}</p>`;
   $('dl-dict').addEventListener('click', () => dl(toCSV(dict), 'text/csv', `${fileStem()}_data_dictionary.csv`));
   $('about-modal-bg').style.display = 'flex';
 }
@@ -1115,16 +1016,15 @@ function dl(content, type, name) {
 }
 
 function levelExportRows() {
-  const L = S.levelByKey[S.level];
-  return [...S.rows].sort((a, b) => a.rank - b.rank).map(r => {
-    const o = { rank: r.rank, [L.code]: r.code, [L.name]: r.name ?? '' };
-    S.levels.slice(0, L.rank).forEach((p, k) => { o[p.name] = r.parents?.[k] ?? ''; });
-    Object.assign(o, { pti_score: +r.score.toFixed(2), priority_group: r.cls, priority: r.priority });
-    if (L !== S.base) o[`n_${S.base.key}`] = r.count;
-    if (r.weight != null) o.population = Math.round(r.weight);
-    if (r.coverage != null) o.coverage = +r.coverage.toFixed(3);
+  const T = S.levelByKey[S.level];
+  return [...S.rows].sort((a, b) => (a.rank ?? 1e12) - (b.rank ?? 1e12)).map(r => {
+    const o = { rank: r.rank, [T.code]: r.code, [T.name]: r.name ?? '' };
+    S.levels.slice(0, T.rank).forEach((p, k) => { o[p.name] = r.parents?.[k] ?? ''; });
+    Object.assign(o, { pti_score: r.score, priority: r.priority });
+    if (r.population != null) o.population = Math.round(r.population);
     if (r.robust != null) o.robustness = +r.robust.toFixed(3);
     if (r.projects != null) o.projects = r.projects;
+    o.missing = r.missing.join(' ');
     return o;
   });
 }
@@ -1134,26 +1034,29 @@ function downloadLevelCSV() {
   dl(toCSV(levelExportRows()), 'text/csv', `${fileStem()}_${S.level}_${today()}.csv`);
 }
 
-function downloadBaseCSV() {
+function downloadIndicatorsCSV() {
   if (!S.run) return alert('Run the PTI first.');
-  const rows = S.units.map((u, i) => {
-    const o = {};
-    S.levels.forEach(l => { o[l.code] = u[l.code]; o[l.name] = u[l.name]; });
-    if (S.cfg.population_field) o.population = u[S.cfg.population_field];
-    o.pti_score = S.run.comp.index[i] == null ? null : +S.run.comp.index[i].toFixed(2);
-    o.coverage = +S.run.comp.coverage[i].toFixed(3);
-    for (const p of S.run.parts) { o[p.id] = u[p.id]; o[`${p.id}_class`] = p.scores[i] == null ? null : +p.scores[i].toFixed(2); }
+  const T = S.levelByKey[S.level];
+  const rows = S.rows.map(r => {
+    const o = { [T.code]: r.code, [T.name]: r.name ?? '', pti_score: r.score, priority: r.priority };
+    for (const p of S.res.parts) {
+      o[`${p.id}_value`] = rawValue(p, T, r.i);
+      o[`${p.id}_from`] = p.from;
+      o[`${p.id}_z`] = p.z[r.i];
+      o[`${p.id}_weight`] = p.weight;
+      o[`${p.id}_term`] = p.z[r.i] == null ? null : p.weight * p.z[r.i];
+    }
     return o;
   });
-  dl(toCSV(rows), 'text/csv', `${fileStem()}_${S.base.key}_full_${today()}.csv`);
+  dl(toCSV(rows), 'text/csv', `${fileStem()}_${S.level}_indicators_${today()}.csv`);
 }
 
 function levelGeoJSON() {
-  const L = S.levelByKey[S.level], gj = S.geo[L.key];
+  const T = S.levelByKey[S.level], gj = S.geo[T.key];
   if (!gj) return null;
-  const look = new Map(levelExportRows().map(r => [String(r[L.code]), r]));
-  return { type: 'FeatureCollection', features: gj.features.filter(f => look.has(String(f.properties[L.code])))
-    .map(f => ({ type: 'Feature', geometry: f.geometry, properties: look.get(String(f.properties[L.code])) })) };
+  const look = new Map(levelExportRows().map(r => [String(r[T.code]), r]));
+  return { type: 'FeatureCollection', features: gj.features.filter(f => look.has(String(f.properties[T.code])))
+    .map(f => ({ type: 'Feature', geometry: f.geometry, properties: look.get(String(f.properties[T.code])) })) };
 }
 
 function downloadGeoJSON() {
@@ -1165,21 +1068,30 @@ function downloadGeoJSON() {
 
 /* Everything needed to reproduce or cite a run */
 function runNotes() {
-  const total = S.run.parts.reduce((s, p) => s + p.weight, 0);
+  const T = S.levelByKey[S.level];
   return {
     dataset: S.cfg.id, country: S.cfg.country, dataset_built: S.cfg.built, run_at: S.run.date.toISOString(),
-    thematic_pti: S.run.scenarioLabel,
-    method: { classification: S.run.method, classes: S.run.nClasses, score_scale: `1-${S.run.nClasses}`,
-      composite: '0-100 = (weighted mean class score - 1) / (classes - 1) * 100',
-      min_coverage: S.run.minCoverage, aggregation: S.weightField ? `population-weighted (${S.weightField})` : 'unweighted mean',
-      level_shown: S.level },
-    indicators: S.run.parts.map(p => ({ id: p.id, label: p.meta.label, weight_pct: +(p.weight / total * 100).toFixed(2),
-      direction: p.direction, native_level: levelOf(p.id).key, scoring: p.meta.scoring || 'classes',
-      breaks: p.breaks, filled: p.filled, missing: p.missing, fill_rule: p.meta.fill ?? null,
-      unit: p.meta.unit, source: p.meta.source_note, year: p.meta.year })),
+    weighting_scheme: S.run.schemeLabel,
+    method: {
+      standard: 'devPTIpack methodology — https://worldbank.github.io/devPTIpack/articles/methodology.html',
+      normalisation: 'z-score per indicator among the units of each spatial level (sample standard deviation)',
+      index: 'PTI = sum of weight × z-score (signed weights)',
+      cross_level: S.cfg.cross_level === 'devptipack_code' ? 'project coarser z-scores down; average finer z-scores up (devPTIpack R code)' : 'project coarser z-scores down; no upward aggregation',
+      missing: S.cfg.missing === 'ignore' ? 'missing terms dropped from the sum' : 'units missing any selected indicator get no score',
+      level: S.level, priority_groups: S.groups.groups, group_breaks: S.groups.breaks,
+    },
+    indicators: S.res.parts.map(p => {
+      const src = S.levelByKey[p.from], st = PTICore.stats(src.rows.map(r => r[p.id]));
+      const m = S.ind.get(p.id);
+      return { id: p.id, label: m.label, weight: p.weight, used_as: p.via, normalised_at: p.from,
+        mean: st.mean, sd: st.sd, n_units: st.n, unit: m.unit, source: m.source_note, year: m.year,
+        prepared: m.provenance?.[p.from] };
+    }),
+    not_used_at_this_level: S.res.excluded,
+    units: { total: T.rows.length, scored: S.rows.filter(r => r.score != null).length },
     robustness: S.robust ? { draws: S.robust.draws, spread: S.robust.spread, top_share: S.robust.topShare,
-      mean_rank_correlation: S.robust.spearman?.mean, stable_share: S.robust.stableShare, level: S.level } : null,
-    interpretation: 'Relative composite index conditional on the selected indicators and weights. It highlights where to look more closely and does not by itself determine project locations.',
+      mean_rank_correlation: S.robust.spearman?.mean, stable_share: S.robust.stableShare } : null,
+    interpretation: 'Relative composite index for geographic targeting; depends on the indicators and weights chosen. Complement with field knowledge.',
     disclaimer: S.cfg.about?.disclaimer || null,
   };
 }
@@ -1191,8 +1103,7 @@ function downloadRunNotes() {
 /* ── Publish to ArcGIS (optional) ────────────────────────── */
 function showAgolModal() {
   if (!S.run) return alert('Run the PTI first.');
-  const L = S.levelByKey[S.level];
-  $('agol-title').value = `${S.cfg.country || S.cfg.id} PTI ${L.label} ${today()}`;
+  $('agol-title').value = `${S.cfg.country || S.cfg.id} PTI ${levelLabel(S.level)} ${today()}`;
   $('agol-portal').value = S.cfg.arcgis_publish?.portal || 'https://www.arcgis.com';
   $('agol-status').textContent = ''; $('agol-status').className = '';
   $('agol-modal-bg').style.display = 'flex';
@@ -1222,7 +1133,7 @@ async function runAgolPublish() {
     st.textContent = `Uploading ${(blob.size / 1e6).toFixed(1)} MB as ${user}…`;
     const form = new FormData();
     Object.entries({ f: 'json', token, title, type: itemType, overwrite: 'false',
-      description: runNotes().interpretation, tags: 'PTI,targeting', snippet: `${S.run.scenarioLabel || 'Custom'} · ${S.run.nClasses} ${S.run.method} classes` })
+      description: runNotes().interpretation, tags: 'PTI,targeting,devPTIpack', snippet: `${S.run.schemeLabel || 'Custom'} · ${levelLabel(S.level)} · ${S.groups.groups} priority groups` })
       .forEach(([k, v]) => form.append(k, v));
     form.append('file', blob, fileName);
     const added = await (await fetch(`${portal}/sharing/rest/content/users/${encodeURIComponent(user)}/addItem`, { method: 'POST', body: form })).json();

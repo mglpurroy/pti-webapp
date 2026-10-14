@@ -1,118 +1,132 @@
 # Method
 
-The PTI Builder implements the analytical logic of **PTI 2.0** (*Technical Note: Project Targeting Index 2.0 — Advancing Spatial Targeting for Operational Decision-Making and Portfolio Balancing*, World Bank Poverty & Equity GP). The note implements PTI 2.0 with ArcGIS Pro's Weighted Raster Overlay and the Experience Builder Suitability Modeler. This tool keeps the method and drops the platform dependency: it runs in any browser, from a static website, on data prepared with open-source Python.
+The PTI Builder follows the World Bank **devPTIpack methodology**:
+<https://worldbank.github.io/devPTIpack/articles/methodology.html> (package: <https://github.com/worldbank/devPTIpack>).
+It reproduces the R package's results exactly; see [Testing against devPTIpack](#testing-against-devptipack).
 
-Where the two differ, it is noted below.
+The index is computed in the browser by [`app/js/pti-core.js`](../app/js/pti-core.js). The data preparation that devPTIpack does in R (the metadata workbook, zonal statistics, hexagon aggregation) is done by [`prep/build_dataset.py`](../prep/build_dataset.py). An existing devPTIpack dashboard can also be loaded directly with [`prep/import_devptipack.py`](../prep/import_devptipack.py).
 
-## 1. Spatial units, not just administrative boundaries
+## 1. Spatial levels
 
-PTI 2.0 moves from fixed administrative polygons to a surface that can hold data at any scale. Here the **base unit** is whatever the dataset declares as its finest level:
+A dataset has one or more spatial levels, ordered coarse to fine: regions → districts → wards, optionally down to a hexagonal or square grid. Every unit carries the code of the unit it lies in at each coarser level.
 
-- administrative units (wards, communes, districts)
-- a regular grid, which is the raster-cell equivalent (the Demoland example uses ~5 km cells)
-- settlements, catchments or any other polygon set
+Each indicator is prepared at the levels it should be available at. Values come either from data published at that level (a survey representative at region level, say) or from aggregation done during preparation (see §5).
 
-Coarser levels (district, region …) are derived by aggregating base-unit scores, so the same run can be read at any level.
+## 2. Normalisation: z-scores, per level
 
-Indicators can be measured at any level. A district-level survey estimate is stored on every base unit in the district, and the app labels it with the level it was measured at. Classification is done **at the indicator's native level** (one value per district, not one per grid cell). Otherwise a district containing 900 cells would pull the class breaks toward its own value.
-
-> *Difference from the note:* WRO rasterises everything to cells first. Zonal statistics (`type: raster`) bring raster inputs onto the base units instead. With a fine grid as the base unit, the two converge.
-
-## 2. Categorisation
-
-Each selected indicator is split into **N classes** (default 5, configurable 3–9):
-
-| Method | Breaks | Use when |
-|---|---|---|
-| **Quantile** (default) | equal number of units per class | most indicators; robust to skew and outliers |
-| **Equal interval** | equal-width value ranges | values with a meaningful linear scale |
-| **Natural breaks** | optimal 1-D clustering (Jenks / ckmeans) | clearly clustered distributions |
-| **Fixed thresholds** (`scoring.type: breaks`) | set in the configuration | policy or sector thresholds (e.g. IPC, WHO cut-offs) |
-| **Category scores** (`scoring.type: categories`) | each value mapped to a score | categorical or binary layers: constraints, masks, phases |
-
-Ties are allowed. Breaks are inclusive upper bounds. An indicator with no variation cannot be classified; the app warns and it contributes nothing.
-
-## 3. Scoring and direction
-
-Classes are scored **1 to N**. Each indicator has a **direction**:
-
-- **ascending** (↑): a higher value means a higher score, i.e. higher priority (poverty rate, travel time)
-- **descending** (↓): a higher value means a lower score (enrolment, electricity access)
-
-Directions are set per indicator in the configuration and can be flipped in the app. Values can be negative (vegetation change, growth rates), because classification works on any real numbers. PTI 1.0 needed data pre-flipped to "higher = priority"; that is no longer necessary.
-
-A layer scored with fixed thresholds that define fewer than N classes is rescaled linearly onto 1..N, so it combines on the same scale as everything else. Category scores are used as given and ignore direction.
-
-## 4. Weighting and combination
-
-Weights are percentages that must sum to 100. The composite for unit *i* is the weighted mean of its class scores:
+Each indicator *j* is standardised among the units *i* of a level:
 
 ```
-raw_i   = Σ_k  w_k · s_ik            (Σ w_k = 1, s in 1..N)
-index_i = (raw_i − 1) / (N − 1) × 100
+z_ij = (x_ij − mean_j) / sd_j
 ```
 
-The 0–100 **PTI score** is a linear rescaling of the weighted 1..N suitability score. 0 means the lowest class on every selected indicator and 100 the highest. Rankings are identical to the raw WRO-style score.
+- The mean and standard deviation are computed **separately at every level**. Districts are compared with districts and regions with regions, so the same raw value can have a different z-score at different levels.
+- `sd` is the sample standard deviation (n − 1), as R's `sd()`.
+- A level with one unit, or with identical values, gives every unit z = 0 (no information), as devPTIpack does.
+- Missing values stay missing.
 
-Worked example from the note (two inputs on a 1–3 scale, weights 75/25, cell scores 2 and 3): `2 × 0.75 + 3 × 0.25 = 2.25`. This is checked in `tests/core.test.js`.
+## 3. The index: signed, weighted sum
 
-> *Difference from the note:* WRO rounds the output to an integer raster. The score here is kept continuous, so ties are rarer and rankings finer.
+```
+PTI_i = Σ_j  w_j · z_ij
+```
 
-## 5. Missing data
+- **The sign of the weight is the direction.** A positive weight means higher values push a unit toward higher priority (poverty rate). A negative weight means higher values push it toward lower priority (electricity access).
+- **The size of the weight is relative importance.** A weight of 2 counts twice as much as a weight of 1. Weights don't need to sum to anything.
+- A weight of 0 leaves the indicator out.
 
-PTI 2.0 requires inputs to be **filled inside the study area**. Here that is an explicit, documented choice per indicator (`fill:` in the configuration):
+A dataset ships **weighting schemes** (the devPTIpack `weights_table`). Users can start from one, change any weight, or build their own.
 
-| fill | Meaning |
+## 4. Projection across levels
+
+At level *L*, each selected indicator contributes:
+
+| Indicator available… | Contribution at *L* |
 |---|---|
-| a number, `zero` | a known default, e.g. no recorded events = 0 |
-| `median`, `mean`, `min`, `max` | computed over the indicator's native units |
-| *(none)* | leave the gap |
+| at *L* | its z-score at *L* |
+| not at *L*, but at a coarser level | the z-score of the **finest coarser level** that has it, copied to every unit inside: **top-down projection**, normalised at the coarser level and **not re-normalised** |
+| only at finer levels | nothing: the indicator is **not used at *L*** and the app says so |
 
-Remaining gaps count against the unit's **coverage**, the share of the selected weight it has data for. A unit is scored only if coverage ≥ `min_coverage` (default 1.0, i.e. complete data). Above that threshold its weights are renormalised over the indicators it has. The app reports how many units were filled, partly scored or left unscored, and the run notes record it per indicator.
+The methodology states that data is **not aggregated upward**. Where an indicator should count at a coarser level, its values for that level are prepared explicitly during data preparation (§5).
 
-## 6. Aggregation
+> **devPTIpack code mode.** The R code (`expand_adm_levels()` / `agg_pti_scores()`) does aggregate upward. Where an indicator is missing at the target level, it takes the finest level available, coarser or finer, and averages finer-level z-scores within each target unit (unweighted). Set `app.cross_level: devptipack_code` to reproduce this, for example when comparing with an existing devPTIpack dashboard. The default, `project`, follows the methodology.
 
-A district (or region) score is the mean of its base-unit scores, **population-weighted** when the dataset has population. Population weighting describes the average person rather than the average unit; switch it off in the app for an unweighted mean.
+## 5. Preparing data at coarser levels
 
-**Priority groups** ("Very low" … "Very high") are quantile groups of the scores shown, so they are relative to the run, not fixed thresholds.
+Values for a level come from one of:
 
-## 7. Thematic PTIs
+- **a source at that level** (`sources:` in the configuration): a table, a raster summarised with zonal statistics, counted points, or an ArcGIS layer
+- **aggregation from the level it was measured at** (`aggregate_to:`), done **directly** from that level to each target, never chained through intermediate levels. The function (`mean`, `sum`, `min`, `max`, `median`) and weighting (`population`, `area` or none) are set per indicator, the same rule devPTIpack applies to hexagon data:
 
-Instead of one index, a dataset defines several **thematic PTIs** (Energy, Nutrition, Social Development, …). Each is a named set of indicators and weights built with the same method. They appear in the PTI selector, and any of them can be edited into a custom run.
+| Indicator | Function | Weighting |
+|---|---|---|
+| Poverty rate | mean | population |
+| Population count | sum | none |
+| Night-time lights | mean | none |
+| Flood exposure (index) | mean | area |
 
-## 8. Political-economy and operational constraints
+The data dictionary in the app shows how every level of every indicator was prepared.
 
-Where a constraint has a spatial dimension (restricted access, conflict-affected zones, funding quotas), add it as a layer, usually with category scores. The Demoland example scores `operational_access` as 5 (open) or 1 (restricted), and its "Core PTI + operational access" thematic PTI shows the effect. Constraints without a spatial form still have to be weighed outside the tool.
+## 6. Missing data
 
-## 9. Testing sensitivity and robustness
+devPTIpack's default: **a unit missing any selected indicator gets no score and no priority** ("No data" on the map). Setting `app.missing: ignore` corresponds to devPTIpack's `na_rm_pti = TRUE`: missing terms are dropped from that unit's sum.
 
-The note asks users to *test sensitivity*, *assess robustness* and *identify gaps*. The app supports all three:
+Gaps can also be filled during preparation with an explicit, documented rule per indicator (`fill: zero | min | max | mean | median | <number>`). The fill is applied at the measured level *before* aggregating, so coarser levels summarise the same values. The data dictionary records how many units were filled.
 
-- **Compare runs.** Save a run and compare later ones against it: rank correlation (Spearman), top-20% overlap, and overlaid score distributions.
-- **Robustness test.** Re-runs the PTI 200 times with every weight multiplied by a random factor (±25/50/75%) and renormalised. For each unit it reports the share of runs in which the unit lands in the top group (top 10/20/30%). It also reports the mean rank correlation with the baseline and the share of the baseline top group that stays there in at least 80% of runs. Units in the top group 20–80% of the time are **borderline**: their priority depends on the weights. Class breaks are held fixed, because they don't depend on weights.
-- **Unit profile.** Click any unit to see each indicator's value, class, weight and points. The points sum to the score. This is the "layer query" listed as a future enhancement in the note.
+## 7. Priority groups
 
-## 10. Portfolio balance
+At each level the PTI values are split into **equal-size groups (quantiles)**, 5 by default (2–10 in the app). **Priority 1 is the highest PTI.** As in devPTIpack's legend:
 
-When a dataset includes a portfolio layer (`role: portfolio`, e.g. project locations from GEMS or the Operations Portal), the Portfolio tab compares where projects are with where the index points:
+- breaks are R type-7 quantiles at 0, 1/n, …, 1, with duplicate breaks dropped
+- intervals are right-closed, with the lowest value included
+- integer-valued scores with fewer than 12 distinct values are grouped by value
 
-- share of projects against share of population, by priority group
-- share of projects in the lowest-priority groups
-- **gaps**: highest-priority units with no project
+## 8. Choosing weights: sensitivity
 
-These are prompts for discussion, not siting decisions.
+Weights are agreed by consensus: experiment, check sensitivity, then settle them with the project team and counterparts. The app supports each step:
 
-## 11. Communicating results
+- **Experiment.** Change any weight and re-run; the map, table and distribution update.
+- **Compare schemes** (Sensitivity tab). Against any shipped scheme or saved run, at the level shown: Spearman rank correlation, Priority 1 overlap, and how many units change group.
+- **Random weights** (Sensitivity tab). 200 re-runs with every weight multiplied by a random factor (±25/50/75%, signs kept). The tab reports mean and minimum rank correlation, the share of the top group that stays there in at least 80% of draws, and which units are **borderline** (in the top group in 20–80% of draws). These can also be mapped.
+- **Unit profile.** Click a unit to see each indicator's value, z-score, weight and term *w·z*. The terms sum to the PTI, and projected indicators show the level they came from.
 
-The app follows section 6.6 of the note:
+Rankings are most sensitive when few indicators are used or when they are only loosely correlated.
 
-- The legend and exports describe the output as a *relative composite index, conditional on the selected indicators and weights*.
-- The data dictionary (About → Data dictionary) lists every indicator's source, year, level, direction, unit, fill rule and scoring, and can be downloaded.
-- **Run notes** (↓ Run notes) record everything needed to reproduce or cite a run: method, classes, weights, directions, the actual class breaks, fill and missing counts, aggregation and robustness settings.
+## 9. Beyond the index
 
-## Limitations
+These features don't change the index:
 
-- Results are only as current and consistent as the inputs. Countries without recent census or survey data may need proxies or partial coverage.
-- Quantile classes discard magnitude: a unit just inside the top class scores the same as the most extreme one. Use fixed thresholds where magnitude matters.
-- Weights are a judgement. The robustness test shows how much rankings depend on them, but it does not choose them.
-- Broadcast coarse indicators add no variation within their parent units. The app warns when the map is shown below the coarsest selected indicator's level.
+- **Data explorer.** Map any indicator's raw values at any level: the "one-stop shop" role of a PTI dashboard.
+- **Portfolio balance.** With a project layer (`role: portfolio`): share of projects against share of population by priority group, and Priority 1 units without a project.
+- **Overlays.** Roads, facilities, settlements.
+- **Run notes.** Everything needed to reproduce or cite a run: weights, how each indicator was used, the mean and sd it was normalised with, group breaks and missing-data handling.
+
+As the methodology stresses, identifying priority areas should not rest on the PTI alone. Complement it with field knowledge, and record site-level implementation challenges.
+
+## Differences from the devPTIpack code
+
+The published methodology and the R code differ in two places. This implementation follows the **methodology**.
+
+1. **Weight magnitude.** The methodology says a weight of +2 makes an indicator twice as influential. The R code multiplies values by the weight *before* z-scoring (`get_weighted_data()` → `get_scores_data()`). Since z(w·x) = sign(w)·z(x), only the sign survives, and +2 gives exactly the same PTI as +1. This was confirmed by running the package on its Rwanda sample: identical scores at every level. Here the weight multiplies the z-score, as the methodology states.
+2. **Upward aggregation.** The methodology says finer data is not aggregated upward (except hexagon data, during preparation). The R code averages finer z-scores into coarser units when an indicator is missing at the target level, and its own tests assert this. Here that behaviour is opt-in (`cross_level: devptipack_code`).
+
+With weights of ±1 (where the two readings coincide) and `cross_level: devptipack_code`, results match the R package exactly.
+
+## Testing against devPTIpack
+
+`tests/fixtures/make_devptipack_fixtures.R` runs devPTIpack's own calculation functions on its bundled **Rwanda** and **Ukraine** samples. The Ukraine sample is an edge-case set: indicators only at ADM1, at ADM1+2, at ADM2+4 and only at the hexagon level, with missing values and a zero-variance indicator. The script uses four weighting schemes and both missing-data modes, and saves the inputs and PTI scores.
+
+`tests/core.test.js` checks:
+
+- the worked examples in the methodology article: z-scores at ADM1 and ADM2, the two-indicator PTI, projection from ADM1 to ADM2
+- **code mode equals the R pipeline at every level**, for all schemes and both missing-data modes, on both samples (tolerance 1e-8 relative)
+- **methodology mode equals the R pipeline** wherever no finer-only indicator is involved
+
+`tests/import.test.js` imports devPTIpack's sample deployment bundle (`metadata.xlsx` + `shapefiles.zip`) with `import_devptipack.py`, runs the index on the imported files, and compares more than 10,000 unit scores with the R results.
+
+## References
+
+- devPTIpack methodology: <https://worldbank.github.io/devPTIpack/articles/methodology.html>
+- Finn, A., & Masaki, T. (2020). *Subnational Targeting of Project Sites Using Project Targeting Index (PTI)*. Poverty and Equity Notes No. 33. World Bank.
+- Masaki, T., Bosch, L., Finn, A., Meyer, M., Haider, S. Z., & Bukin, E. (2022). *Dashboards for development: the power of geospatial data at your fingertips*. Poverty and Equity Notes No. 47. World Bank.
+- World Bank (2019). *Approaches to targeting in South Sudan*.
