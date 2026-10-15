@@ -39,6 +39,9 @@ async function init() {
     const ds = S.index.datasets || [];
     if (!ds.length) throw new Error('data/index.json lists no datasets');
     const want = new URLSearchParams(location.search).get('data');
+    // A dataset folder can be opened by URL without being listed in the
+    // index — keeps private/internal datasets out of a published index.json
+    if (want && /^[\w-]+$/.test(want) && !ds.some(d => d.id === want)) ds.push({ id: want, path: want, label: want });
     const pick = ds.find(d => d.id === want) || ds[0];
     if (ds.length > 1) {
       const sel = $('dataset-select');

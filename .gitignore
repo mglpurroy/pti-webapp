@@ -15,3 +15,7 @@ desktop.ini
 # Large raw inputs for real countries — keep them out of git
 prep/countries/*/inputs/
 app/data/_local_*/
+
+# Internal country data - never commit
+app/data/nigeria/
+prep/countries/

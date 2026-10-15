@@ -258,6 +258,133 @@ def values_from_raster(src: dict, lv: dict, geos, base_dir: Path) -> pd.Series:
     return pd.Series([z.get(stat) for z in zs], index=g[lv["code"]].values, dtype="float64")
 
 
+# ── Grid summaries ────────────────────────────────────────────
+# Population-weighted statistics computed from a raster's own cells for
+# every unit of a level — directly from the grid at each level, never from
+# another level's summaries. Weights come from `population_raster`, summed
+# onto the indicator's grid.
+GRID_STATS = {"mean", "share_worst", "share_best", "share_above", "share_below", "percentile"}
+_CTX: dict = {}          # set by build(): population_raster path
+_GRID_CACHE: dict = {}   # raster path → (values, weights, transform, crs, shape)
+_LABEL_CACHE: dict = {}  # (raster path, level) → (labels, fallback cells)
+_CUTOFFS: dict = {}      # national cut-offs, so every level uses the same one
+GRID_NOTES: dict = {}    # human-readable cut-offs for the data dictionary
+
+
+def _grid(path: Path, src: dict):
+    import rasterio
+    from rasterio.warp import Resampling, reproject
+    key = (str(path), src.get("weight", "population"))
+    if key in _GRID_CACHE:
+        return _GRID_CACHE[key]
+    with rasterio.open(path) as r:
+        a = r.read(1).astype("float64")
+        nd = src.get("nodata", r.nodata)
+        if nd is not None:
+            a[a == nd] = np.nan
+        a[~np.isfinite(a)] = np.nan
+        transform, crs, shape = r.transform, r.crs, r.shape
+    w = None
+    pop = _CTX.get("population_raster")
+    if pop is not None and src.get("weight", "population") == "population":
+        w = np.zeros(shape, dtype="float64")
+        with rasterio.open(pop) as p:
+            reproject(source=rasterio.band(p, 1), destination=w, src_transform=p.transform, src_crs=p.crs,
+                      src_nodata=p.nodata, dst_transform=transform, dst_crs=crs, dst_nodata=0,
+                      resampling=Resampling.sum)
+        w[~np.isfinite(w) | (w < 0)] = 0
+    _GRID_CACHE[key] = (a, w, transform, crs, shape)
+    return _GRID_CACHE[key]
+
+
+def _labels(path: Path, lv: dict, g: gpd.GeoDataFrame, transform, crs, shape):
+    """Unit index (1-based) of every cell whose centre falls in a unit. Units
+    too small to contain a cell centre take the cell at their representative
+    point."""
+    import rasterio
+    from rasterio import features
+    key = (str(path), lv["key"])
+    if key in _LABEL_CACHE:
+        return _LABEL_CACHE[key]
+    gp = g.to_crs(crs)
+    lab = features.rasterize(((geom, i + 1) for i, geom in enumerate(gp.geometry)), out_shape=shape,
+                             transform=transform, fill=0, dtype="int32")
+    present = np.zeros(len(gp) + 1, dtype=bool)
+    present[np.unique(lab)] = True
+    missing = [i for i in range(len(gp)) if not present[i + 1]]
+    extra = []
+    if missing:
+        pts = gp.geometry.iloc[missing].representative_point()
+        rows, cols = rasterio.transform.rowcol(transform, pts.x.values, pts.y.values)
+        extra = [(i, r, c) for i, r, c in zip(missing, rows, cols) if 0 <= r < shape[0] and 0 <= c < shape[1]]
+        log(f"      {len(extra)} {lv['label'].lower()} unit(s) smaller than a cell — using the cell at their centre")
+    _LABEL_CACHE[key] = (lab, extra)
+    return _LABEL_CACHE[key]
+
+
+def _wquantile(v: np.ndarray, w: np.ndarray, q: float) -> float:
+    o = np.argsort(v)
+    cw = np.cumsum(w[o])
+    return float(v[o][np.searchsorted(cw, q * cw[-1])])
+
+
+def values_from_grid(src: dict, lv: dict, geos, base_dir: Path) -> pd.Series:
+    """Population-weighted summary of a raster per unit.
+
+    stat: mean          weighted mean
+          share_worst   % of people in the country's worst `share` (default 20%) of
+                        the population distribution; "worst" follows higher_is_worse
+          share_best    the same at the other end
+          share_above / share_below   % of people above / below `threshold`
+          percentile    weighted `p`-th percentile within the unit (default 80)
+    """
+    path = (base_dir / src["file"]).resolve()
+    a, w, transform, crs, shape = _grid(path, src)
+    g = geos[lv["key"]]
+    lab, extra = _labels(path, lv, g, transform, crs, shape)
+    m = lab > 0
+    df = pd.DataFrame({"u": lab[m] - 1, "v": a[m], "w": w[m] if w is not None else 1.0})
+    if extra:
+        df = pd.concat([df, pd.DataFrame({"u": [e[0] for e in extra], "v": [a[e[1], e[2]] for e in extra],
+                                          "w": [w[e[1], e[2]] if w is not None else 1.0 for e in extra]})])
+    df = df[np.isfinite(df["v"])]
+    # A unit with no people in any cell is summarised by area instead
+    tot = df.groupby("u")["w"].transform("sum")
+    df.loc[tot <= 0, "w"] = 1.0
+    stat = src.get("stat", "mean")
+    hiw = src.get("_higher_is_worse", True)
+    W = df.groupby("u")["w"].sum()
+
+    def share(cond):
+        return (df["w"] * cond).groupby(df["u"]).sum() / W * 100
+
+    if stat == "mean":
+        res = (df["v"] * df["w"]).groupby(df["u"]).sum() / W
+    elif stat in ("share_worst", "share_best"):
+        q = float(src.get("share", 0.2))
+        high = hiw if stat == "share_worst" else not hiw
+        ck = (str(path), stat, q, high)
+        if ck not in _CUTOFFS:   # national, computed once so every level shares it
+            _CUTOFFS[ck] = _wquantile(df["v"].values, df["w"].values, 1 - q if high else q)
+            GRID_NOTES[(str(path), stat, q)] = (_CUTOFFS[ck], high)
+        cut = _CUTOFFS[ck]
+        res = share(df["v"] >= cut if high else df["v"] <= cut)
+    elif stat in ("share_above", "share_below"):
+        t = float(src["threshold"])
+        res = share(df["v"] > t if stat == "share_above" else df["v"] < t)
+    elif stat == "percentile":
+        p = float(src.get("p", 80)) / 100
+        d = df.sort_values(["u", "v"])
+        cum = d.groupby("u")["w"].cumsum()
+        tot = d.groupby("u")["w"].transform("sum")
+        res = d[cum >= p * tot].groupby("u")["v"].first()
+    else:
+        raise BuildError(f"unknown grid stat '{stat}'")
+    out = pd.Series(np.nan, index=g[lv["code"]].astype(str).values, dtype="float64")
+    out.iloc[res.index.values] = res.values
+    return out
+
+
 def values_from_points(src: dict, lv: dict, geos, base_dir: Path, tables, population) -> pd.Series:
     pts = read_vector(src, base_dir)
     if src.get("filter"):
@@ -284,6 +411,8 @@ def values_at(src: dict, lv: dict, geos, base_dir: Path, tables, population) -> 
     if t in ("table", "arcgis"):
         return values_from_table(src, lv, geos, base_dir)
     if t == "raster":
+        if src.get("stat", "mean") in GRID_STATS:
+            return values_from_grid(src, lv, geos, base_dir)
         return values_from_raster(src, lv, geos, base_dir)
     if t == "points":
         return values_from_points(src, lv, geos, base_dir, tables, population)
@@ -330,7 +459,18 @@ def fill_value(values: pd.Series, rule):
 def describe_source(src: dict) -> str:
     t = src.get("type", "table")
     if t == "raster":
-        return f"raster {src.get('stat', 'mean')} of {Path(src['file']).name}"
+        name, stat = Path(src["file"]).name, src.get("stat", "mean")
+        wtd = "population-weighted " if _CTX.get("population_raster") and src.get("weight", "population") == "population" else ""
+        if stat in ("share_worst", "share_best"):
+            q = float(src.get("share", 0.2))
+            note = GRID_NOTES.get((str((_CTX["base_dir"] / src["file"]).resolve()), stat, q))
+            cut = f" ({'≥' if note[1] else '≤'} {note[0]:.4g}, national cut-off)" if note else ""
+            return f"% of people in the country's {'worst' if stat == 'share_worst' else 'best'} {q:.0%}{cut} of {name}"
+        if stat in ("share_above", "share_below"):
+            return f"% of people {'above' if stat == 'share_above' else 'below'} {src['threshold']} in {name}"
+        if stat == "percentile":
+            return f"{wtd}{src.get('p', 80)}th percentile of {name} within the unit"
+        return f"raster {wtd}{stat} of {name}"
     if t == "points":
         return f"points ({src.get('stat', 'count')}) from {Path(src['file']).name}"
     if t == "arcgis":
@@ -516,6 +656,14 @@ def build(yaml_path: Path, check_only: bool = False) -> None:
     tables = level_tables(levels, geos)
     base = levels[-1]
 
+    _CTX.clear(); _GRID_CACHE.clear(); _LABEL_CACHE.clear(); _CUTOFFS.clear(); GRID_NOTES.clear()
+    _CTX["base_dir"] = base_dir
+    if cfg.get("population_raster"):
+        pr = (base_dir / cfg["population_raster"]["file"]).resolve()
+        if not pr.exists():
+            raise BuildError(f"population_raster not found: {pr}")
+        _CTX["population_raster"] = pr
+
     population = None
     if cfg.get("population"):
         log("\nPopulation")
@@ -557,15 +705,22 @@ def build(yaml_path: Path, check_only: bool = False) -> None:
             return s
 
         try:
-            if ind.get("source"):
-                log(f"  {iid}  [{lvl['key']}, {ind['source'].get('type', 'table')}]")
+            src0 = {**ind["source"], "_higher_is_worse": ind.get("higher_is_worse", True)} if ind.get("source") else None
+            if src0:
+                log(f"  {iid}  [{lvl['key']}, {src0.get('type', 'table')}]")
                 # Filled before aggregating, so coarser levels summarise the
                 # same values the measured level shows
-                by_level[lvl["key"]] = finalize(lvl["key"], values_at(ind["source"], lvl, geos, base_dir, tables, population))
-                prov[lvl["key"]] = describe_source(ind["source"])
+                by_level[lvl["key"]] = finalize(lvl["key"], values_at(src0, lvl, geos, base_dir, tables, population))
+                prov[lvl["key"]] = describe_source(src0)
             agg = ind.get("aggregate") or {}
             for t in ind.get("aggregate_to") or []:
                 tl = level_of(levels, t)
+                if src0 and src0.get("type") == "raster":
+                    # Rasters are summarised straight from the grid at every level
+                    by_level[t] = finalize(t, values_at(src0, tl, geos, base_dir, tables, population))
+                    prov[t] = describe_source(src0) + " (from the grid)"
+                    log(f"      → {t}: {prov[t]}")
+                    continue
                 fn, w = agg.get("fn", "mean"), agg.get("weight")
                 by_level[t] = finalize(t, aggregate(by_level[lvl["key"]], lvl, tl, tables, population, fn, w))
                 prov[t] = f"{'population-weighted ' if w == 'population' else 'area-weighted ' if w == 'area' else ''}"                           f"{fn} of {lvl['label'].lower()} values"

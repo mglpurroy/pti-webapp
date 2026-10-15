@@ -127,6 +127,24 @@ source: {type: raster, file: inputs/travel_time.tif, stat: mean}   # mean | medi
 # optional: nodata: -9999, all_touched: true
 ```
 
+**raster summaries that keep within-unit detail.** Averaging a fine raster into a district hides how unequal it is inside. With a top-level `population_raster` (e.g. WorldPop), these statistics are computed from the raster's own cells, weighted by people, for every unit:
+
+```yaml
+population_raster: {file: inputs/worldpop_2020_100m.tif}      # top level of pti.yaml
+
+source: {type: raster, file: inputs/walk_to_care.tif, stat: share_worst, share: 0.2}
+```
+
+| `stat` | Meaning | Needs |
+|---|---|---|
+| `mean` | population-weighted mean | |
+| `share_worst` | % of the unit's people in the country's worst `share` (default 20%) of the population-weighted distribution; "worst" follows `higher_is_worse`. The national cut-off is computed once and shared by every level | nothing indicator-specific |
+| `share_best` | the same at the other end | |
+| `share_above`, `share_below` | % of people above / below `threshold` | a threshold, where a standard exists (e.g. 60 min walk to care) |
+| `percentile` | population-weighted `p`-th percentile within the unit (default 80) | |
+
+`share_worst` is the generic default: it needs no expert threshold. Use `share_above` / `share_below` where a recognised cut-off exists. With `aggregate_to`, raster indicators are recomputed **from the grid** at each coarser level, never averaged from finer units. Units too small to contain a cell centre use the cell at their centre. Use one summary per indicator; the mean and the share of the same variable together double-count it.
+
 **points**: point features counted per unit:
 
 ```yaml

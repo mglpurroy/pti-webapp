@@ -170,7 +170,7 @@
       ],
       "provenance": {
         "cell": "raster mean of travel_time_health.tif",
-        "region": "population-weighted mean of grid cell values",
+        "region": "raster mean of travel_time_health.tif (from the grid)",
         "district": "raster mean of travel_time_health.tif"
       }
     },
@@ -388,5 +388,5 @@
       ]
     }
   ],
-  "built": "2026-10-13 22:10"
+  "built": "2026-10-15 10:40"
 }
