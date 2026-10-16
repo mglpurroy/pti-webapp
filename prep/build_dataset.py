@@ -51,7 +51,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 EQUAL_AREA = "EPSG:6933"  # for areas in km²
 APP_KEYS = {  # pti.yaml `app:` keys passed through to config.json
     "title", "country", "subtitle", "default_level", "bins", "missing", "cross_level",
-    "legend", "map", "basemap", "pillars", "scenarios", "about", "arcgis_publish",
+    "legend", "map", "basemap", "pillars", "scenarios", "about", "arcgis_publish", "banner",
     "data_refresh_note",
 }
 AGG_FNS = {"mean", "sum", "min", "max", "median"}

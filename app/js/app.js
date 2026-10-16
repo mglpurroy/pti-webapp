@@ -104,6 +104,15 @@ function setupDataset() {
     else $('refresh-cmd').style.display = 'none';
   }
   if (portfolioLayer()) $('portfolio-tab').style.display = '';
+  // Optional notice from the dataset config, e.g. "test build — not for decisions"
+  if (c.banner) {
+    $('app-banner-text').textContent = c.banner;
+    $('app-banner').style.display = '';
+    $('map-area').classList.add('has-banner');
+    $('app-banner-close').addEventListener('click', () => {
+      $('app-banner').style.display = 'none'; $('map-area').classList.remove('has-banner');
+    });
+  }
   $('data-status').style.display = 'none';
   const base = S.levels[S.levels.length - 1];
   $('app-subtitle').title = `${base.rows.length.toLocaleString()} ${base.label.toLowerCase()} units · ${c.indicators.length} indicators · built ${c.built || '?'}`;

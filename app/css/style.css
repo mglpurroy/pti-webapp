@@ -722,3 +722,12 @@ td.num { font-variant-numeric: tabular-nums; }
 .sens-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 5px; font-size: 12px; }
 .sens-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .level-note.warn div + div { margin-top: 3px; }
+
+/* Dataset notice */
+#app-banner {
+  position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 700; max-width: 640px;
+  display: flex; gap: 10px; align-items: flex-start; padding: 8px 12px; border-radius: 6px;
+  background: #7c2d12; color: #fff; font-size: 12px; line-height: 1.4; box-shadow: 0 2px 10px rgba(0,0,0,.25);
+}
+#app-banner button { background: none; border: none; color: #fff; cursor: pointer; font-size: 13px; opacity: .8; }
+.has-banner .level-note.warn { top: 56px; }
