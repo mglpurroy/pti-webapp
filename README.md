@@ -25,6 +25,7 @@ It reproduces the [devPTIpack](https://github.com/worldbank/devPTIpack) R packag
 | **Data explorer** | map any indicator's raw values at any level |
 | **Sensitivity** | compare schemes (rank correlation, Priority 1 overlap) and random-weight robustness |
 | **Portfolio balance** | projects against priority groups; Priority 1 units with no project |
+| **Gridded access** | travel-time surfaces from roads + destinations (`prep/travel_time.py`), summarised per unit by population: mean, % of people in the national worst 20%, % over a threshold, percentiles |
 | **Context layers** | roads, facilities, settlements, any GeoJSON-able layer |
 | **Exports** | CSV, indicators CSV (values, z, terms), GeoJSON, run notes, data dictionary |
 | **devPTIpack import** | load an existing dashboard's `metadata.xlsx` + `shapefiles.zip` |
@@ -61,6 +62,7 @@ app/                       the web app (static — deploy this folder)
 prep/
   build_dataset.py         pti.yaml → app/data/<id>/
   import_devptipack.py     devPTIpack metadata.xlsx + shapefiles.zip → app/data/<id>/
+  travel_time.py           roads + destination points → travel-time raster
   arcgis_rest.py, arcgis_login.py, list_webmap_layers.py   optional ArcGIS helpers
   examples/demoland/       synthetic example: inputs generator + pti.yaml
   examples/devptipack_sample/   devPTIpack's sample bundle (import test)
