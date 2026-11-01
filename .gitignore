@@ -19,3 +19,4 @@ app/data/_local_*/
 # Internal country data - never commit
 app/data/nigeria/
 prep/countries/
+app/data/syria/
