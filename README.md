@@ -68,6 +68,7 @@ prep/
   examples/devptipack_sample/   devPTIpack's sample bundle (import test)
   examples/arcgis_template/     template for ArcGIS-hosted data
 docs/
+  ARCHITECTURE.md          components, technology used in each, data flow (diagram)
   METHODOLOGY.md           the method, how it maps to devPTIpack, and where its code and docs differ
   CONFIGURATION.md         every pti.yaml option
   DEPLOYMENT.md            local, Posit Connect, GitHub Pages, ArcGIS options
