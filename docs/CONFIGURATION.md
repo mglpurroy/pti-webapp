@@ -176,6 +176,17 @@ population:
 
 Any source type works; a WorldPop raster with `stat: sum` is common. Population is summed to every coarser level.
 
+When the finest level does not nest cleanly in the levels above (hexagons, grid cells), the summed totals drift from the official ones. Supply exact totals per level with `sources:`; they replace the summed values for those levels:
+
+```yaml
+population:
+  level: hex
+  source: {type: table, file: processed/hex_values.csv, key: h3_index, column: pop}
+  sources:
+    adm1: {type: table, file: processed/pop_adm1.csv, key: adm1_pcode, column: pop}
+    adm2: {type: table, file: processed/pop_adm2.csv, key: adm2_pcode, column: pop}
+```
+
 ## `overlays`
 
 ```yaml

@@ -675,6 +675,12 @@ def build(yaml_path: Path, check_only: bool = False) -> None:
             if lv["key"] != plv["key"] and levels.index(lv) < levels.index(plv):
                 population[lv["key"]] = aggregate(s, plv, lv, tables, None, "sum")
         log(f"  total {np.nansum(s.values):,.0f} at {plv['key']} level")
+        # Exact totals supplied for other levels replace the summed ones
+        for k, src in (pc.get("sources") or {}).items():
+            sl = level_of(levels, k)
+            population[k] = values_at(src, sl, geos, base_dir, tables, None)
+            population[k].index = population[k].index.astype(str)
+            log(f"  {k}: supplied directly, total {np.nansum(population[k].values):,.0f}")
 
     log("\nIndicators")
     values: dict[str, dict[str, pd.Series]] = {}
