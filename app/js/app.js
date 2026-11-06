@@ -145,6 +145,7 @@ function wireStatic() {
   $('calc-btn').addEventListener('click', runPTI);
   $('results-toggle').addEventListener('click', toggleDrawer);
   $('unit-weights-btn').addEventListener('click', unitWeights);
+  $('all-weights-btn').addEventListener('click', selectAll);
   $('clear-weights-btn').addEventListener('click', () => { for (const id of S.ind.keys()) setRow(id, 0); markCustom(); updateWeightSummary(); });
   $('bins-select').addEventListener('change', e => { S.bins = +e.target.value; if (S.run) renderAll(); });
   $('aoi-btn').addEventListener('click', toggleAOI);
@@ -303,6 +304,14 @@ function updateWeightSummary() {
     const c = [...sec.querySelectorAll('.weight-num')].filter(x => +x.value).length;
     sec.querySelector('.cat-sel-count').textContent = c ? `${c} ✓` : '';
   });
+}
+
+// Select every indicator in the sidebar; keeps weights already set, gives the
+// rest the sign suggested by higher_is_worse (same as ticking the box)
+function selectAll() {
+  const w = currentWeights();
+  for (const [id, m] of S.ind) if (!w[id]) setRow(id, m.higher_is_worse === false ? -1 : 1);
+  markCustom(); updateWeightSummary();
 }
 
 function unitWeights() {
