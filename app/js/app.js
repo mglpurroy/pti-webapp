@@ -979,20 +979,19 @@ function showAbout() {
     It is a tool for evidence-based discussion; site selection should also draw on field knowledge.</p>
     <h4>How the index is built</h4>
     <ol class="about-steps">
-      <li><b>Normalise.</b> Each indicator is converted to a z-score, (value − mean) / standard deviation, among the units of each
-        spatial level separately — districts are compared with districts, regions with regions.</li>
-      <li><b>Project.</b> At a level where an indicator is not available, each unit takes the z-score of the coarser unit it lies in,
-        as normalised at that coarser level.${c.cross_level === 'devptipack_code'
+      <li><b>Normalise.</b> Each indicator is converted to a z-score, (value − mean) / standard deviation. The mean and standard
+        deviation are calculated separately for each spatial level, so districts are compared with districts, and regions with regions.</li>
+      <li><b>Project.</b> At a level where an indicator is not available, each spatial unit takes the z-score of the coarser unit it lies in.${c.cross_level === 'devptipack_code'
           ? ' This dataset also averages finer-level z-scores up to coarser units where an indicator is only available finer (as the devPTIpack R code does).'
           : ' Finer-level data is not aggregated upward; coarser-level values are prepared in advance where needed.'}</li>
-      <li><b>Weight and sum.</b> PTI = Σ weight × z-score. A positive weight means higher values raise priority; a negative weight
+      <li><b>Weight and sum.</b> For each spatial unit, the PTI is calculated as Σ (weight × z-score). A positive weight means higher values raise priority; a negative weight
         means they lower it. A weight of 2 counts twice as much as a weight of 1.</li>
-      <li><b>Group.</b> Units are ranked and split into ${S.bins} equal-size groups (quantiles). Priority 1 is the highest PTI.
+      <li><b>Group.</b> Spatial units are ranked by their PTI and split into ${S.bins} equal-size groups (quantiles). Priority 1 is the highest PTI.
         ${c.missing === 'ignore' ? 'Units missing an indicator are scored on the indicators they have.' : 'Units missing any selected indicator get no score and no priority.'}</li>
     </ol>
     <h4>Choosing weights</h4>
-    <p>Weights are agreed by consensus: experiment with combinations, check how sensitive the ranking is (Sensitivity tab: scheme
-    comparison and random weights), then settle on weights with the project team and government counterparts. A ranking is robust
+    <p>Weights are agreed by consensus: experiment with combinations, check how sensitive the ranking is (Sensitivity tab supports scheme
+    comparison and random weights), then settle on a final set of weights with the project team and government counterparts. A ranking is robust
     when the top-priority areas stay largely the same under reasonable changes in weights. Rankings are most sensitive when few, or
     loosely correlated, indicators are used.</p>
     ${sc ? `<h4>Weighting schemes</h4><ul class="about-list">${sc}</ul>` : ''}
